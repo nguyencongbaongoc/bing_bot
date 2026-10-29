@@ -171,7 +171,7 @@ def active_edge_browsing_cooldown(page, total_seconds: int = 900):
     logger.info("[Edge Browsing] Hoàn thành đợt tích lũy thời gian Cooldown.")
 
 
-def apply_stealth_scripts(context, is_mobile: bool = False):
+def apply_stealth_scripts(context, is_mobile: bool = False, cpu_threads: int = None):
     """Tiêm script xóa dấu vết tự động hóa của Playwright/CDP và đồng bộ User-Agent Client Hints, hardwareConcurrency, deviceMemory."""
     platform_val = "Linux armv8l" if is_mobile else "Win32"
     ua_platform = "Android" if is_mobile else "Windows"
@@ -179,7 +179,9 @@ def apply_stealth_scripts(context, is_mobile: bool = False):
     model_val = "Pixel 7" if is_mobile else ""
     platform_version = "14.0.0" if is_mobile else "15.0.0"
     arch_val = "arm" if is_mobile else "x86"
-    hw_concurrency = 8 if is_mobile else 12
+    if cpu_threads is None:
+        cpu_threads = os.cpu_count() or 4
+    hw_concurrency = 8 if is_mobile else cpu_threads
     device_memory = 8
 
     stealth_js = f"""
