@@ -44,6 +44,7 @@ from core import (
     ensure_streak_protection,
     detect_unusual_activity_warning,
     solve_visual_search_streak,
+    handle_visual_search_streak,
     solve_mobile_app_daily_checkin,
     solve_mobile_app_promotions,
     solve_mobile_app_read_to_earn,
@@ -386,6 +387,9 @@ def run_full_pipeline(
     d_context = None
     m_context = None
     all_tasks_completed = False
+    all_maxed = False
+    all_activities_done = False
+    retry_count = getattr(args, "retry_count", 0) if args else 0
 
     try:
         # Network Guard: Chờ kết nối Internet ổn định tối đa 60s sau khi máy thức dậy từ Sleep
@@ -422,11 +426,14 @@ def run_full_pipeline(
                 # Khởi tạo session logging ngay lập tức
                 init_session(start_points)
 
-                # KIỂM TRA TIẾN ĐỘ THỰC TẾ TRÊN DASHBOARD / POINTS BREAKDOWN NGAY TỪ ĐẦU
+                # KIỂM TRA TIẾN ĐỘ THỰC TẾ TRÊN DASHBOARD / POINTS BREAKDOWN NGAY TỪ ĐẦU (SCAN PHASE 1)
                 initial_progress = get_daily_search_progress(d_page)
+                all_maxed = initial_progress.get("all_maxed", False)
+                all_activities_done = initial_progress.get("all_activities_done", False)
                 is_explicit_test = bool(args and getattr(args, "desktop_target", None) == 0 and getattr(args, "mobile_target", None) == 0)
                 is_test_target = bool(args and ((getattr(args, 'desktop_target', 30) not in (0, 30)) or (getattr(args, 'mobile_target', 20) not in (0, 20))))
-                if initial_progress.get("all_maxed") and initial_progress.get("all_activities_done", False) and not is_explicit_test and not is_test_target:
+                _log_info(f"[Scan Phase 1] Tiến độ thực tế ban đầu: Desktop {initial_progress.get('pc_cur')}/{initial_progress.get('pc_max')} | Mobile {initial_progress.get('mobile_cur')}/{initial_progress.get('mobile_max')}")
+                if all_maxed and all_activities_done and not is_explicit_test and not is_test_target:
                     _log_info("[✓] Đã kiểm tra Dashboard: Toàn bộ nhiệm vụ và điểm tìm kiếm hôm nay đã đạt 100%! Bỏ qua tìm kiếm.")
                     desktop_target = 0
                     mobile_target = 0
@@ -529,28 +536,41 @@ def run_full_pipeline(
                     except Exception:
                         pass
 
-                    # Kiểm tra lại tiến độ sau khi hoàn thành Activities
+                    # Kiểm tra lại tiến độ sau khi hoàn thành Activities (SCAN PHASE 2)
                     post_progress = get_daily_search_progress(d_page)
-                    if post_progress.get("all_maxed"):
+                    pc_cur = post_progress.get("pc_cur", 0)
+                    pc_max = post_progress.get("pc_max", 90)
+                    mob_cur = post_progress.get("mobile_cur", 0)
+                    mob_max = post_progress.get("mobile_max", 60)
+                    all_maxed = post_progress.get("all_maxed", False)
+                    all_activities_done = post_progress.get("all_activities_done", False)
+
+                    if all_maxed:
                         if is_test_target:
                             _log_info(f"[Test Mode] Điểm hôm nay đã đạt tối đa, nhưng tiếp tục chạy lượt tìm kiếm thử nghiệm: Desktop={desktop_target}, Mobile={mobile_target}")
                         else:
-                            _log_info("[✓] Điểm tìm kiếm PC và Mobile hôm nay đã đạt tối đa! Không cần tìm kiếm thêm.")
+                            _log_info("[✓] Dữ liệu thực tế xác nhận: Điểm tìm kiếm PC và Mobile hôm nay đã đạt tối đa 100%! Không cần tìm kiếm thêm.")
                             desktop_target = 0
                             mobile_target = 0
-                            all_tasks_completed = True
+                            if all_activities_done:
+                                all_tasks_completed = True
+                            else:
+                                _log_info("[!] Điểm tìm kiếm đã đạt đỉnh nhưng vẫn còn hoạt động chưa hoàn thành (all_activities_done = False).")
                     else:
-                        desktop_needed = max(0, (post_progress["pc_max"] - post_progress["pc_cur"]) // 3)
-                        mobile_needed = max(0, (post_progress["mobile_max"] - post_progress["mobile_cur"]) // 3)
+                        rem_pc_pts = max(0, pc_max - pc_cur)
+                        rem_mob_pts = max(0, mob_max - mob_cur)
+                        desktop_needed = (rem_pc_pts + 2) // 3
+                        mobile_needed = (rem_mob_pts + 2) // 3
                         orig_d = desktop_target
                         orig_m = mobile_target
                         if not is_test_target:
-                            desktop_target = min(orig_d, desktop_needed)
-                            mobile_target = min(orig_m, mobile_needed)
-                        _log_info(f"[Target Updated] Số lượt cần tìm thực tế: Desktop={desktop_target} (còn thiếu {post_progress['pc_max'] - post_progress['pc_cur']} pts) | Mobile={mobile_target} (còn thiếu {post_progress['mobile_max'] - post_progress['mobile_cur']} pts)")
+                            desktop_target = desktop_needed
+                            mobile_target = mobile_needed
+                        _log_info(f"[Scan Phase 2] Dữ liệu thực tế: Desktop {pc_cur}/{pc_max} (thiếu {rem_pc_pts} pts -> cần tìm ~{desktop_target} câu) | Mobile {mob_cur}/{mob_max} (thiếu {rem_mob_pts} pts -> cần tìm ~{mobile_target} câu)")
                         if desktop_target == 0 and mobile_target == 0 and not is_explicit_test and not is_test_target:
-                            _log_info("[✓] Điểm tìm kiếm PC và Mobile hôm nay đã đạt tối đa! Không cần tìm kiếm thêm.")
-                            all_tasks_completed = True
+                            _log_info("[✓] Dữ liệu thực tế xác nhận: Điểm tìm kiếm PC và Mobile hôm nay đã đạt tối đa 100%! Không cần tìm kiếm thêm.")
+                            if all_activities_done:
+                                all_tasks_completed = True
 
             finally:
                 if d_context:
@@ -562,39 +582,12 @@ def run_full_pipeline(
                     d_context = None
 
             # ========================================================
-            # BƯỚC 1.5: MOBILE CONTEXT - CHECK-IN
-            # ========================================================
-            if not all_tasks_completed or is_explicit_test:
-                _log_info("Khởi chạy Mobile Context để xử lý Mobile App Check-in...")
-                try:
-                    m_context = create_mobile_context(p, headless)
-                    m_page = m_context.pages[0] if m_context.pages else m_context.new_page()
-                    m_page.set_default_timeout(DEFAULT_TIMEOUT)
-
-                    try:
-                        solve_mobile_checkin(m_page)
-                        claim_all_available_rewards(m_page)
-                        update_session(0, None, "Mobile check-in completed")
-                    except Exception as e:
-                        _log_warning(f"Bỏ qua điểm danh Mobile: {e}")
-
-                except Exception as e:
-                    _log_error(f"Lỗi khi mở Mobile Context cho check-in: {e}")
-                finally:
-                    if m_context:
-                        try:
-                            m_context.close()
-                            _log_info("Đã đóng Mobile context sau Mobile Check-in.")
-                        except Exception:
-                            _log_info("Mobile context đã tự đóng trước đó.")
-                        m_context = None
-
-            # ========================================================
             # BƯỚC 2: VÒNG LẶP XEN KẼ TÌM KIẾM (COOLDOWN PIPELINE)
             # ========================================================
             if (all_tasks_completed and not is_test_target) or (desktop_target == 0 and mobile_target == 0):
                 _log_info("[2/3] Bỏ qua hoàn toàn chu trình tìm kiếm chống Cooldown do toàn bộ điểm đã đạt tối đa.")
-                all_tasks_completed = True
+                if all_maxed and all_activities_done:
+                    all_tasks_completed = True
             else:
                 # Phá vỡ quy luật dừng máy móc đúng trần 30/20 câu: thỉnh thoảng tìm dư thêm 1-2 lượt tự nhiên
                 if not is_test_target and not is_explicit_test:
@@ -617,183 +610,264 @@ def run_full_pipeline(
                     d_page = d_context.pages[0] if d_context.pages else d_context.new_page()
                     d_page.set_default_timeout(DEFAULT_TIMEOUT)
 
-                    while d_done < desktop_target or m_done < mobile_target:
-                        batch_completed = 0
-                        pc_searched_round = 0
-                        mob_searched_round = 0
+                    max_double_check_retries = 3
+                    double_check_attempt = 0
 
-                        # Đảm bảo d_page vẫn hoạt động
-                        if d_page is None or d_page.is_closed():
-                            d_page = d_context.new_page()
-                            d_page.set_default_timeout(DEFAULT_TIMEOUT)
+                    while True:
+                        while d_done < desktop_target or m_done < mobile_target:
+                            batch_completed = 0
+                            pc_searched_round = 0
+                            mob_searched_round = 0
 
-                        # ---- 2.1 DESKTOP BATCH ----
-                        if d_done < desktop_target:
-                            # Biến thiên kích thước batch tự nhiên 2-4 câu thay vì cố định 3 câu
-                            current_d_batch = random.randint(2, 4) if (args is None or getattr(args, "batch_size", 3) == 3) else batch_size
-                            batch_limit = min(current_d_batch, desktop_target - d_done)
-                            for i in range(batch_limit):
-                                if queries_idx >= len(queries):
-                                    more_q = get_unique_search_queries(target_count=10, geo="VN")
-                                    queries.extend(more_q)
-                                q = queries[queries_idx]
-                                queries_idx += 1
-                                
-                                _log_info(f"[PC Search {d_done + 1}/{desktop_target}] {q[:50]}...")
-                                
-                                # 3 lượt đầu tiên dùng Sidebar Search (form=PRSB01), sau đó dùng Desktop thông thường
-                                search_type = "sidebar" if d_done < 3 else "desktop"
-                                if execute_single_search(d_page, q, device_type=search_type):
-                                    d_done += 1
-                                    batch_completed += 1
-                                    pc_searched_round += 1
-                                    save_searched_keyword(q)
-                                    # Update session after each successful search
-                                    current_points = extract_current_points(d_page)
-                                    update_session(d_done + m_done, current_points, f"Desktop search {d_done}/{desktop_target}")
+                            # Đảm bảo d_page vẫn hoạt động
+                            if d_page is None or d_page.is_closed():
+                                d_page = d_context.new_page()
+                                d_page.set_default_timeout(DEFAULT_TIMEOUT)
 
-                                    # Khiên Anti-Ban: kiểm tra cảnh báo giới hạn trên trang kết quả
-                                    if not safe_throttle_mode:
-                                        try:
-                                            if detect_unusual_activity_warning(d_page):
-                                                safe_throttle_mode = True
-                                                _log_warning("[Anti-Ban Shield] Phát hiện cảnh báo giới hạn tốc độ tìm kiếm! Chuyển sang chế độ Safe Throttle (giãn cách 35-60s/câu)...")
-                                        except Exception:
-                                            pass
-
-                                    # Cluster Search (~30% xác suất nếu còn lượt tìm kiếm kế tiếp trong batch)
-                                    if d_done < desktop_target and random.random() < 0.30:
-                                        try:
-                                            cluster_kw = perform_related_cluster_search(d_page, is_mobile=False)
-                                            if cluster_kw:
-                                                d_done += 1
-                                                batch_completed += 1
-                                                pc_searched_round += 1
-                                                save_searched_keyword(cluster_kw)
-                                                _log_info(f"[Cluster Search {d_done}/{desktop_target}] Tiếp nối chuỗi tìm kiếm liên quan: '{cluster_kw}'")
-                                                current_points = extract_current_points(d_page)
-                                                update_session(d_done + m_done, current_points, f"Desktop cluster search {d_done}/{desktop_target}")
-                                        except Exception as e:
-                                            _log_debug(f"Lỗi Cluster Search PC: {e}")
-
-                                    # Giãn cách giữa các câu tìm kiếm trong batch
-                                    if d_done < desktop_target:
-                                        if safe_throttle_mode:
-                                            throttle_sleep = random.uniform(35.0, 60.0)
-                                            _log_info(f"[Safe Throttle] Giãn cách bảo vệ tài khoản: {throttle_sleep:.1f}s trước câu tiếp theo...")
-                                            time.sleep(throttle_sleep)
-                                        else:
-                                            time.sleep(random.uniform(3.0, 7.0))
-
-                            # Chạm đồng xu góc phải #id_rh ngay trên trang kết quả vừa tìm xong để mở đồng bộ điểm
-                            try:
-                                tap_corner_rewards_coin(d_page, context_name="PC-Search")
-                            except Exception as e:
-                                _log_debug(f"Lỗi chạm đồng xu PC-Search: {e}")
-
-                        # Nghỉ chuyển tiếp tự nhiên khi chuyển từ cụm PC sang Mobile (Transition Pause 12-30 giây)
-                        if pc_searched_round > 0 and m_done < mobile_target:
-                            trans_pause = random.randint(12, 30)
-                            _log_info(f"[Stealth] Nghỉ chuyển đổi thiết bị PC -> Mobile ({trans_pause}s)...")
-                            time.sleep(trans_pause)
-
-                        # ---- 2.2 MOBILE BATCH ----
-                        if m_done < mobile_target:
-                            try:
-                                m_context = create_mobile_context(p, headless)
-                                m_page = m_context.pages[0] if m_context.pages else m_context.new_page()
-                                m_page.set_default_timeout(DEFAULT_TIMEOUT)
-
-                                # Biến thiên kích thước batch tự nhiên 2-4 câu
-                                current_m_batch = random.randint(2, 4) if (args is None or getattr(args, "batch_size", 3) == 3) else batch_size
-                                batch_limit = min(current_m_batch, mobile_target - m_done)
+                            # ---- 2.1 DESKTOP BATCH ----
+                            if d_done < desktop_target:
+                                # Biến thiên kích thước batch tự nhiên 2-4 câu thay vì cố định 3 câu
+                                current_d_batch = random.randint(2, 4) if (args is None or getattr(args, "batch_size", 3) == 3) else batch_size
+                                batch_limit = min(current_d_batch, desktop_target - d_done)
                                 for i in range(batch_limit):
                                     if queries_idx >= len(queries):
                                         more_q = get_unique_search_queries(target_count=10, geo="VN")
                                         queries.extend(more_q)
                                     q = queries[queries_idx]
                                     queries_idx += 1
-                                    
-                                    _log_info(f"[Mobile Search {m_done + 1}/{mobile_target}] {q[:50]}...")
-                                    if execute_single_search(m_page, q, device_type="mobile"):
-                                        m_done += 1
+
+                                    _log_info(f"[PC Search {d_done + 1}/{desktop_target}] {q[:50]}...")
+
+                                    # 3 lượt đầu tiên dùng Sidebar Search (form=PRSB01), sau đó dùng Desktop thông thường
+                                    search_type = "sidebar" if d_done < 3 else "desktop"
+                                    if execute_single_search(d_page, q, device_type=search_type):
+                                        d_done += 1
                                         batch_completed += 1
-                                        mob_searched_round += 1
+                                        pc_searched_round += 1
                                         save_searched_keyword(q)
                                         # Update session after each successful search
-                                        current_points = extract_current_points(m_page)
-                                        update_session(d_done + m_done, current_points, f"Mobile search {m_done}/{mobile_target}")
+                                        current_points = extract_current_points(d_page)
+                                        update_session(d_done + m_done, current_points, f"Desktop search {d_done}/{desktop_target}")
 
-                                        # Khiên Anti-Ban: kiểm tra cảnh báo giới hạn trên kết quả mobile
+                                        # Khiên Anti-Ban: kiểm tra cảnh báo giới hạn trên trang kết quả
                                         if not safe_throttle_mode:
                                             try:
-                                                if detect_unusual_activity_warning(m_page):
+                                                if detect_unusual_activity_warning(d_page):
                                                     safe_throttle_mode = True
                                                     _log_warning("[Anti-Ban Shield] Phát hiện cảnh báo giới hạn tốc độ tìm kiếm! Chuyển sang chế độ Safe Throttle (giãn cách 35-60s/câu)...")
                                             except Exception:
                                                 pass
 
                                         # Cluster Search (~30% xác suất nếu còn lượt tìm kiếm kế tiếp trong batch)
-                                        if m_done < mobile_target and random.random() < 0.30:
+                                        if d_done < desktop_target and random.random() < 0.30:
                                             try:
-                                                cluster_kw = perform_related_cluster_search(m_page, is_mobile=True)
+                                                cluster_kw = perform_related_cluster_search(d_page, is_mobile=False)
                                                 if cluster_kw:
-                                                    m_done += 1
+                                                    d_done += 1
                                                     batch_completed += 1
-                                                    mob_searched_round += 1
+                                                    pc_searched_round += 1
                                                     save_searched_keyword(cluster_kw)
-                                                    _log_info(f"[Mobile Cluster Search {m_done}/{mobile_target}] Tiếp nối chuỗi tìm kiếm liên quan: '{cluster_kw}'")
-                                                    current_points = extract_current_points(m_page)
-                                                    update_session(d_done + m_done, current_points, f"Mobile cluster search {m_done}/{mobile_target}")
+                                                    _log_info(f"[Cluster Search {d_done}/{desktop_target}] Tiếp nối chuỗi tìm kiếm liên quan: '{cluster_kw}'")
+                                                    current_points = extract_current_points(d_page)
+                                                    update_session(d_done + m_done, current_points, f"Desktop cluster search {d_done}/{desktop_target}")
                                             except Exception as e:
-                                                _log_debug(f"Lỗi Cluster Search Mobile: {e}")
+                                                _log_debug(f"Lỗi Cluster Search PC: {e}")
 
-                                        # Giãn cách giữa các câu Mobile
-                                        if m_done < mobile_target:
+                                        # Giãn cách giữa các câu tìm kiếm trong batch
+                                        if d_done < desktop_target:
                                             if safe_throttle_mode:
                                                 throttle_sleep = random.uniform(35.0, 60.0)
-                                                _log_info(f"[Safe Throttle] Giãn cách bảo vệ tài khoản: {throttle_sleep:.1f}s trước câu Mobile tiếp theo...")
+                                                _log_info(f"[Safe Throttle] Giãn cách bảo vệ tài khoản: {throttle_sleep:.1f}s trước câu tiếp theo...")
                                                 time.sleep(throttle_sleep)
                                             else:
                                                 time.sleep(random.uniform(3.0, 7.0))
 
-                                # Chạm đồng xu góc trên giao diện di động, ép máy chủ Bing cộng điểm tìm kiếm Mobile ngay lập tức
+                                # Chạm đồng xu góc phải #id_rh ngay trên trang kết quả vừa tìm xong để mở đồng bộ điểm
                                 try:
-                                    tap_corner_rewards_coin(m_page, context_name="Mobile-Search")
+                                    tap_corner_rewards_coin(d_page, context_name="PC-Search")
                                 except Exception as e:
-                                    _log_debug(f"Lỗi chạm đồng xu Mobile-Search: {e}")
+                                    _log_debug(f"Lỗi chạm đồng xu PC-Search: {e}")
 
-                            finally:
-                                if m_context:
+                            # Nghỉ chuyển tiếp tự nhiên khi chuyển từ cụm PC sang Mobile (Transition Pause 12-30 giây)
+                            if pc_searched_round > 0 and m_done < mobile_target:
+                                trans_pause = random.randint(12, 30)
+                                _log_info(f"[Stealth] Nghỉ chuyển đổi thiết bị PC -> Mobile ({trans_pause}s)...")
+                                time.sleep(trans_pause)
+
+                            # ---- 2.2 MOBILE BATCH ----
+                            if m_done < mobile_target:
+                                try:
+                                    m_context = create_mobile_context(p, headless)
+                                    m_page = m_context.pages[0] if m_context.pages else m_context.new_page()
+                                    m_page.set_default_timeout(DEFAULT_TIMEOUT)
+
+                                    # Biến thiên kích thước batch tự nhiên 2-4 câu
+                                    current_m_batch = random.randint(2, 4) if (args is None or getattr(args, "batch_size", 3) == 3) else batch_size
+                                    batch_limit = min(current_m_batch, mobile_target - m_done)
+                                    for i in range(batch_limit):
+                                        if queries_idx >= len(queries):
+                                            more_q = get_unique_search_queries(target_count=10, geo="VN")
+                                            queries.extend(more_q)
+                                        q = queries[queries_idx]
+                                        queries_idx += 1
+
+                                        _log_info(f"[Mobile Search {m_done + 1}/{mobile_target}] {q[:50]}...")
+                                        if execute_single_search(m_page, q, device_type="mobile"):
+                                            m_done += 1
+                                            batch_completed += 1
+                                            mob_searched_round += 1
+                                            save_searched_keyword(q)
+                                            # Update session after each successful search
+                                            current_points = extract_current_points(m_page)
+                                            update_session(d_done + m_done, current_points, f"Mobile search {m_done}/{mobile_target}")
+
+                                            # Khiên Anti-Ban: kiểm tra cảnh báo giới hạn trên kết quả mobile
+                                            if not safe_throttle_mode:
+                                                try:
+                                                    if detect_unusual_activity_warning(m_page):
+                                                        safe_throttle_mode = True
+                                                        _log_warning("[Anti-Ban Shield] Phát hiện cảnh báo giới hạn tốc độ tìm kiếm! Chuyển sang chế độ Safe Throttle (giãn cách 35-60s/câu)...")
+                                                except Exception:
+                                                    pass
+
+                                            # Cluster Search (~30% xác suất nếu còn lượt tìm kiếm kế tiếp trong batch)
+                                            if m_done < mobile_target and random.random() < 0.30:
+                                                try:
+                                                    cluster_kw = perform_related_cluster_search(m_page, is_mobile=True)
+                                                    if cluster_kw:
+                                                        m_done += 1
+                                                        batch_completed += 1
+                                                        mob_searched_round += 1
+                                                        save_searched_keyword(cluster_kw)
+                                                        _log_info(f"[Mobile Cluster Search {m_done}/{mobile_target}] Tiếp nối chuỗi tìm kiếm liên quan: '{cluster_kw}'")
+                                                        current_points = extract_current_points(m_page)
+                                                        update_session(d_done + m_done, current_points, f"Mobile cluster search {m_done}/{mobile_target}")
+                                                except Exception as e:
+                                                    _log_debug(f"Lỗi Cluster Search Mobile: {e}")
+
+                                            # Giãn cách giữa các câu Mobile
+                                            if m_done < mobile_target:
+                                                if safe_throttle_mode:
+                                                    throttle_sleep = random.uniform(35.0, 60.0)
+                                                    _log_info(f"[Safe Throttle] Giãn cách bảo vệ tài khoản: {throttle_sleep:.1f}s trước câu Mobile tiếp theo...")
+                                                    time.sleep(throttle_sleep)
+                                                else:
+                                                    time.sleep(random.uniform(3.0, 7.0))
+
+                                    # Chạm đồng xu góc trên giao diện di động, ép máy chủ Bing cộng điểm tìm kiếm Mobile ngay lập tức
                                     try:
-                                        m_context.close()
+                                        tap_corner_rewards_coin(m_page, context_name="Mobile-Search")
+                                    except Exception as e:
+                                        _log_debug(f"Lỗi chạm đồng xu Mobile-Search: {e}")
+
+                                finally:
+                                    if m_context:
+                                        try:
+                                            m_context.close()
+                                        except Exception:
+                                            pass
+                                        m_context = None
+
+                            # ---- 2.3 COOLDOWN CHECK ----
+                            # Nếu vẫn còn lượt cần tìm, kích hoạt cooldown 15 phút với Edge Browsing
+                            if d_done < desktop_target or m_done < mobile_target:
+                                _log_info(f"Đã hoàn thành đợt: {batch_completed} lượt tìm kiếm.")
+                                _log_info(f"Tiến độ: Desktop {d_done}/{desktop_target} | Mobile {m_done}/{mobile_target}")
+
+                                # Log cooldown start with estimated resume time
+                                cooldown = 15 * 60 + random.randint(30, 90)
+                                resume_time = datetime.datetime.now() + datetime.timedelta(seconds=cooldown)
+                                _log_info(f"[Cooldown] Bắt đầu nghỉ 15 phút. Dự kiến tiếp tục lúc: {resume_time.strftime('%H:%M:%S')}")
+                                update_session(d_done + m_done, None, "Cooldown 15 minutes")
+
+                                # Đảm bảo d_page sẵn sàng trước khi vào cooldown
+                                if d_context is None or d_page is None or d_page.is_closed():
+                                    try:
+                                        d_context = create_desktop_context(p, headless)
+                                        d_page = d_context.pages[0] if d_context.pages else d_context.new_page()
+                                        d_page.set_default_timeout(DEFAULT_TIMEOUT)
                                     except Exception:
                                         pass
-                                    m_context = None
 
-                        # ---- 2.3 COOLDOWN CHECK ----
-                        # Nếu vẫn còn lượt cần tìm, kích hoạt cooldown 15 phút với Edge Browsing
-                        if d_done < desktop_target or m_done < mobile_target:
-                            _log_info(f"Đã hoàn thành đợt: {batch_completed} lượt tìm kiếm.")
-                            _log_info(f"Tiến độ: Desktop {d_done}/{desktop_target} | Mobile {m_done}/{mobile_target}")
-                            
-                            # Log cooldown start with estimated resume time
-                            cooldown = 15 * 60 + random.randint(30, 90)
-                            resume_time = datetime.datetime.now() + datetime.timedelta(seconds=cooldown)
-                            _log_info(f"[Cooldown] Bắt đầu nghỉ 15 phút. Dự kiến tiếp tục lúc: {resume_time.strftime('%H:%M:%S')}")
-                            update_session(d_done + m_done, None, "Cooldown 15 minutes")
-                            
-                            # Đảm bảo d_page sẵn sàng trước khi vào cooldown
-                            if d_context is None or d_page is None or d_page.is_closed():
-                                try:
-                                    d_context = create_desktop_context(p, headless)
-                                    d_page = d_context.pages[0] if d_context.pages else d_context.new_page()
-                                    d_page.set_default_timeout(DEFAULT_TIMEOUT)
-                                except Exception:
-                                    pass
+                                active_edge_browsing_cooldown(d_page, total_seconds=cooldown)
+                                _log_info("")
 
-                            active_edge_browsing_cooldown(d_page, total_seconds=cooldown)
-                            _log_info("")
+                        # Nếu là chạy test target tùy chỉnh (ví dụ --desktop-target 1 --mobile-target 0)
+                        if is_test_target or is_explicit_test:
+                            _log_info("[Test Mode] Đã hoàn thành các lượt tìm kiếm thử nghiệm.")
+                            all_tasks_completed = True
+                            break
+
+                        # ========================================================
+                        # PHA KIỂM TRA CHÉO (DOUBLE CHECK & VERIFICATION PHASE)
+                        # ========================================================
+                        _log_info("\n" + "=" * 60)
+                        _log_info("  [Double-Check] BẮT ĐẦU PHA KIỂM TRA CHÉO TIẾN ĐỘ THỰC TẾ")
+                        _log_info("=" * 60)
+                        _log_info("[Double-Check] Ép chuyển hướng/reload lại Dashboard (rewards.bing.com/earn)...")
+
+                        if d_context is None:
+                            try:
+                                d_context = create_desktop_context(p, headless)
+                            except Exception:
+                                pass
+                        if d_page is None or d_page.is_closed():
+                            if d_context:
+                                d_page = d_context.new_page()
+                                d_page.set_default_timeout(DEFAULT_TIMEOUT)
+
+                        try:
+                            if d_page:
+                                d_page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
+                                d_page.wait_for_timeout(2000)
+                        except Exception as e:
+                            _log_warning(f"[Double-Check] Không thể tải /earn ({e}), thử reload...")
+                            try:
+                                if d_page:
+                                    d_page.reload(wait_until="domcontentloaded", timeout=15000)
+                                    d_page.wait_for_timeout(2000)
+                            except Exception:
+                                pass
+
+                        # Quét lại dữ liệu tiến độ thực tế
+                        re_check = get_daily_search_progress(d_page) if d_page else {}
+                        re_check_pc = re_check.get("pc_cur", 0)
+                        pc_max = re_check.get("pc_max", 90)
+                        re_check_mobile = re_check.get("mobile_cur", 0)
+                        mobile_max = re_check.get("mobile_max", 60)
+                        all_maxed = re_check.get("all_maxed", False)
+                        all_activities_done = re_check.get("all_activities_done", False)
+
+                        _log_info(f"[Double-Check] Kết quả kiểm tra chéo: Desktop {re_check_pc}/{pc_max} | Mobile {re_check_mobile}/{mobile_max}")
+
+                        is_pc_maxed = (re_check_pc >= pc_max) if re_check.get("found_pc") else (d_done >= desktop_target)
+                        is_mob_maxed = (re_check_mobile >= mobile_max) if re_check.get("found_mobile") else (m_done >= mobile_target)
+
+                        if is_pc_maxed and is_mob_maxed:
+                            all_maxed = True
+                            _log_info(f"[Double-Check] [✓] Dữ liệu thực tế xác nhận 100%: Desktop {re_check_pc}/{pc_max} & Mobile {re_check_mobile}/{mobile_max} đã chạm đỉnh!")
+                            if all_activities_done:
+                                all_tasks_completed = True
+                            break
+                        else:
+                            double_check_attempt += 1
+                            rem_pc = max(0, pc_max - re_check_pc) if re_check.get("found_pc") else 0
+                            rem_mob = max(0, mobile_max - re_check_mobile) if re_check.get("found_mobile") else 0
+                            extra_pc = (rem_pc + 2) // 3
+                            extra_mob = (rem_mob + 2) // 3
+
+                            _log_warning(f"[Double-Check] Dữ liệu thực tế CHƯA chạm đỉnh! Còn thiếu: Desktop {rem_pc} pts (~{extra_pc} câu), Mobile {rem_mob} pts (~{extra_mob} câu).")
+
+                            if double_check_attempt > max_double_check_retries:
+                                _log_warning(f"[Double-Check] Đã bù {max_double_check_retries} đợt nhưng server chưa cập nhật đủ (có thể do Cooldown/Rate-limit). Dừng chu trình để bảo vệ tài khoản.")
+                                all_tasks_completed = False
+                                all_maxed = False
+                                break
+
+                            _log_info(f"[Double-Check] Tự động bù thêm số lượt còn thiếu (Đợt bù {double_check_attempt}/{max_double_check_retries}): +{extra_pc} PC, +{extra_mob} Mobile...")
+                            desktop_target = d_done + extra_pc
+                            mobile_target = m_done + extra_mob
+
                 finally:
                     if d_context:
                         try:
@@ -834,11 +908,19 @@ def run_full_pipeline(
             total_searches = d_done + m_done
             log_session_result(start_points, end_points, total_searches)
             
-            all_tasks_completed = all_tasks_completed or (d_done >= desktop_target and m_done >= mobile_target)
-            finish_session(end_points, status="completed" if all_tasks_completed else "partial")
+            # Chỉ coi là hoàn tất khi dữ liệu thực tế xác nhận 100%
+            status_str = "completed" if (all_maxed and all_activities_done) else "partial"
+            finish_session(end_points, status=status_str)
 
-            if all_tasks_completed and not is_explicit_test and not is_test_target:
-                mark_today_completed()
+            today_str = datetime.date.today().isoformat()
+            can_lock_day = (
+                all_maxed and (all_activities_done or retry_count >= 3)
+            )
+            if can_lock_day:
+                _log_info("[Daily Lock] Đã hoàn thành 100% mục tiêu. Ghi nhận khóa ngày vào daily_state.json.")
+                save_daily_state(completed_date=today_str)
+            else:
+                _log_info("[Daily Lock] Còn nhiệm vụ/điểm chưa đạt 100% (Visual Search hoặc Search). Không khóa daily_state để chu kỳ sau cày tiếp.")
 
             # Sổ cái thống kê điểm số & Dự báo đổi quà
             earned = max(0, end_points - start_points)
@@ -973,13 +1055,13 @@ def is_today_already_completed() -> bool:
         return False
 
 
-def mark_today_completed():
+def save_daily_state(completed_date: str = None):
     """
     Ghi nhận ngày hôm nay đã hoàn thành 100% mục tiêu vào data/daily_state.json.
     """
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        today_str = datetime.date.today().isoformat()
+        today_str = completed_date or datetime.date.today().isoformat()
         state = {
             "completed_date": today_str,
             "completed_at": datetime.datetime.now().isoformat(),
@@ -990,6 +1072,9 @@ def mark_today_completed():
         _log_info(f"[Daily Lock] Đã ghi nhận hoàn tất 100% ngày hôm nay ({today_str}) vào data/daily_state.json.")
     except Exception as e:
         _log_warning(f"[Daily Lock] Lỗi khi ghi daily_state.json: {e}")
+
+
+mark_today_completed = save_daily_state
 
 
 def update_points_ledger(total_points: int, earned_today: int):
@@ -1229,6 +1314,12 @@ Ví dụ sử dụng:
         dest="auto_sleep",
         action="store_false",
         help="Vô hiệu hóa tính năng tự động Sleep khi hoàn tất."
+    )
+    parser.add_argument(
+        "--retry-count",
+        type=int,
+        default=0,
+        help="Số lần thử lại trong ngày (mặc định 0)"
     )
     
     args = parser.parse_args()

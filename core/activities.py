@@ -4,6 +4,7 @@ Xử lý các loại nhiệm vụ: Daily Check-in, Daily Set (giữ Streak), Mor
 """
 
 import random
+import re
 import time
 import urllib.parse
 import zlib
@@ -22,6 +23,7 @@ from core.ai_solver import ask_local_ai, solve_quiz_with_ai, unload_model_from_v
 REWARDS_URL = "https://rewards.bing.com/"
 
 DEFAULT_TIMEOUT = 8000  # 8 seconds default timeout
+_keep_earning_executed_in_session: bool = False
 
 
 def dismiss_popups(page: Page) -> None:
@@ -651,11 +653,7 @@ def run_all_dashboard_activities(context: BrowserContext, page: Page) -> None:
         "More Activities"
     )
     if more_count == 0:
-        _log_info("[More Activities] Không tìm thấy thẻ trên Dashboard cũ. Sẽ quét mục 'Keep earning' tại /earn...")
-        try:
-            solve_keep_earning_activities(page, context)
-        except Exception as e:
-            _log_warning(f"[More Activities] Lỗi khi quét Keep Earning: {e}")
+        _log_info("[More Activities] Không tìm thấy thẻ trên Dashboard cũ (mục 'Keep earning' tại /earn sẽ được quét riêng 1 lần duy nhất).")
     
     # 4. Các khu vực khác có thể có (Special Offers, v.v.)
     solve_cards_in_section(
@@ -1123,13 +1121,35 @@ def solve_all_earn_quests(page: Page):
                             try:
                                 sub_tab.wait_for_load_state("domcontentloaded", timeout=6000)
                                 sub_tab.wait_for_timeout(2000)
-                                # Nếu tab mới là bài Quiz/Poll thì giải luôn
-                                from core.activities import solve_interactive_tab
-                                solve_interactive_tab(sub_tab)
-                                sub_tab.mouse.wheel(0, 300)
-                                sub_tab.wait_for_timeout(1500)
-                            except Exception:
-                                pass
+
+                                lower_btn = btn_label.lower()
+                                is_search_action = any(k in lower_btn for k in ["search", "tìm kiếm", "find", "costume", "decor"])
+                                search_box = sub_tab.locator("input[name='q'], textarea[name='q']").first
+
+                                if is_search_action or (search_box.count() > 0 and search_box.is_visible(timeout=2500)):
+                                    if search_box.is_visible(timeout=4000):
+                                        # Gõ từ khóa thực tế và Enter
+                                        keywords = ["halloween costume ideas", "spooky decor trends", "autumn travel destinations"]
+                                        chosen_kw = random.choice(keywords)
+                                        logger.info(f"       [*] Thực hiện tìm kiếm thật trên tab Quest: '{chosen_kw}'...")
+                                        search_box.click()
+                                        search_box.fill(chosen_kw)
+                                        sub_tab.keyboard.press("Enter")
+                                        sub_tab.wait_for_load_state("domcontentloaded", timeout=8000)
+                                        sub_tab.wait_for_timeout(random.randint(4000, 6000))
+                                        # Cuộn nhẹ trang kết quả để server ghi nhận tương tác
+                                        sub_tab.mouse.wheel(0, random.randint(300, 600))
+                                        sub_tab.wait_for_timeout(1500)
+                                    else:
+                                        sub_tab.wait_for_timeout(random.randint(3000, 4500))
+                                else:
+                                    # Nếu tab mới là bài Quiz/Poll thì giải luôn
+                                    from core.activities import solve_interactive_tab
+                                    solve_interactive_tab(sub_tab)
+                                    sub_tab.mouse.wheel(0, 300)
+                                    sub_tab.wait_for_timeout(1500)
+                            except Exception as e:
+                                logger.warning(f"       [!] Lỗi khi xử lý tab Quest: {e}")
                             finally:
                                 try:
                                     sub_tab.close()
@@ -1155,18 +1175,15 @@ def solve_all_earn_quests(page: Page):
                 logger.warning(f"   [!] Lỗi khi xử lý Quest {idx+1}: {e}")
                 continue
 
-        # Sau khi xong các Quest dạng Punch Card, quét luôn mục "Keep earning" tại /earn
-        try:
-            solve_keep_earning_activities(page, page.context)
-        except Exception as e:
-            logger.warning(f"[!] Lỗi khi quét Keep Earning trong Universal Quest Resolver: {e}")
-
     except Exception as e:
         logger.warning(f"[!] Lỗi trong Universal Quest Resolver: {e}")
     finally:
         logger.info("============================================================")
         logger.info("   HOÀN THÀNH: UNIVERSAL QUEST RESOLVER")
         logger.info("============================================================\n")
+
+
+handle_universal_quest_resolver = solve_all_earn_quests
 
 
 def solve_keep_earning_activities(page: Page, context: Optional[BrowserContext] = None) -> int:
@@ -1184,6 +1201,12 @@ def solve_keep_earning_activities(page: Page, context: Optional[BrowserContext] 
 
     if context is None:
         context = page.context
+
+    global _keep_earning_executed_in_session
+    if _keep_earning_executed_in_session:
+        _log_info("[Keep Earning] Mục 'Keep earning' đã được quét trong phiên trước đó. Bỏ qua quét lặp dư thừa.")
+        return 0
+    _keep_earning_executed_in_session = True
 
     _log_info("============================================================")
     _log_info("   BẮT ĐẦU: QUÉT MỤC 'KEEP EARNING' TẠI /EARN")
@@ -1487,6 +1510,9 @@ def solve_keep_earning_activities(page: Page, context: Optional[BrowserContext] 
         _log_info("============================================================\n")
 
 
+scan_keep_earning_section = solve_keep_earning_activities
+
+
 def claim_msn_daily_gaming_tile(page: Page):
     """Quét và click thẻ nhận điểm Daily Tile trên trang MSN Gaming."""
     from core.tracker import _logger as logger
@@ -1653,10 +1679,10 @@ def solve_promotional_links(page: Page):
 
 
 def create_random_sample_png(filepath: str = "data/visual_sample.png") -> str:
-    """Tạo một file ảnh PNG 200x200 RGB hợp lệ có họa tiết màu ngẫu nhiên mỗi lần chạy."""
+    """Tạo một file ảnh PNG 100x100 RGB hợp lệ có họa tiết màu ngẫu nhiên mỗi lần chạy."""
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
-    width, height = 200, 200
+    width, height = 100, 100
     raw_data = bytearray()
     r_base = random.randint(30, 220)
     g_base = random.randint(30, 220)
@@ -1682,262 +1708,207 @@ def create_random_sample_png(filepath: str = "data/visual_sample.png") -> str:
     return str(path.resolve())
 
 
-def ensure_sample_image() -> str:
-    """Tạo file ảnh PNG mẫu nếu chưa tồn tại (tương thích ngược)."""
-    return create_random_sample_png()
+def ensure_sample_image(filepath: str = "data/visual_sample.png") -> str:
+    """Tạo file ảnh PNG mẫu 100x100 nếu chưa tồn tại (tương thích ngược)."""
+    p = Path(filepath)
+    if not p.exists() or p.stat().st_size == 0:
+        return create_random_sample_png(filepath)
+    return str(p.resolve())
 
 
-def solve_visual_search_streak(page: Page):
+def handle_visual_search_streak(page: Page) -> bool:
     """
-    Thực hiện Visual Search Streak theo chuẩn 4 bước của người dùng thật:
-    1. Kích hoạt từ thẻ Visual Search trên Dashboard (rewards.bing.com) để nhận campaign token.
-    2. Mở hộp thoại Visual Search (Camera/Lens) trên thanh tìm kiếm bing.com.
-    3. Tải file ảnh thật (dynamic PNG) lên qua <input type="file"> hoặc click ảnh mẫu (tuyệt đối không redirect URL).
-    4. Tương tác trên trang kết quả, chạm đồng xu và quay lại Dashboard nhận thưởng.
+    Thực hiện Visual Search Streak:
+    1. Đảm bảo file ảnh mẫu data/visual_sample.png tồn tại (tạo PNG 100x100 hợp lệ).
+    2. Truy cập thẳng trang: https://www.bing.com/visualsearch thay vì click camera.
+    3. Tìm thẻ input: page.locator("input[type='file']").first.
+    4. Nạp file: page.locator("input[type='file']").first.set_input_files(image_path).
+    5. Đợi trang kết quả phân tích ảnh xuất hiện (URL chứa iss=sbi hoặc .visual-search-results), giữ trang 5-7s.
+    6. Quay lại Dashboard kiểm tra lại: Nếu thẻ Visual Search vẫn 0/1 [✗], thử lại tối đa 2 lần nữa (tổng 3 lần).
+       Nếu vẫn không được, ghi log cảnh báo [WARNING] Visual Search chưa nổ điểm sau 3 lần thử và cắm cờ visual_failed = True.
     """
-    logger.info("--- BẮT ĐẦU: VISUAL SEARCH STREAK (TRIGGER TỪ DASHBOARD & UPLOAD ẢNH THẬT) ---")
+    logger.info("--- BẮT ĐẦU: VISUAL SEARCH STREAK (TRUY CẬP TRỰC TIẾP & UPLOAD ẢNH) ---")
+    visual_failed = False
+    max_attempts = 3
+    sample_img_path = ensure_sample_image("data/visual_sample.png")
+
     try:
-        from core.activities import dismiss_popups, tap_corner_rewards_coin, claim_all_available_rewards
+        from core.activities import dismiss_popups, claim_all_available_rewards, tap_corner_rewards_coin
 
-        # Bước 1: Kích hoạt từ thẻ Visual Search trên Dashboard (rewards.bing.com)
-        logger.info("   [1/4] Kiểm tra và kích hoạt nhiệm vụ từ Rewards Dashboard...")
-        if "rewards.bing.com" not in page.url or "pointsbreakdown" in page.url:
-            page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2500)
-        dismiss_popups(page)
+        for attempt in range(1, max_attempts + 1):
+            logger.info(f"[*] Visual Search - Lần thử {attempt}/{max_attempts}...")
+            # Kiểm tra xem trên Dashboard đã hoàn thành từ trước hay chưa
+            if "rewards.bing.com" not in page.url:
+                page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(2000)
+            dismiss_popups(page)
 
-        # Kiểm tra xem thẻ đã hoàn thành từ trước chưa
-        is_already_done = page.evaluate('''() => {
-            const pb = document.querySelector('[aria-label="Visual Search"], [aria-label*="trực quan" i]');
-            if (pb) {
-                const cur = parseFloat(pb.getAttribute('aria-valuenow') || '0');
-                const max = parseFloat(pb.getAttribute('aria-valuemax') || '1');
-                const valText = (pb.getAttribute('aria-valuetext') || '').trim();
-                return (max > 0 && cur >= max) || valText === '100%';
-            }
-            return false;
-        }''')
-        if is_already_done:
-            logger.info("   [✓] Thẻ Visual Search đã hoàn thành (1/1) từ trước! Bỏ qua.")
-            return
+            is_already_done = page.evaluate(r'''() => {
+                const pb = document.querySelector('[role="progressbar"][aria-label*="Visual Search" i], [role="progressbar"][aria-label*="trực quan" i]');
+                if (pb) {
+                    const cur = parseFloat(pb.getAttribute('aria-valuenow') || '0');
+                    const max = parseFloat(pb.getAttribute('aria-valuemax') || '1');
+                    const valText = (pb.getAttribute('aria-valuetext') || '').trim();
+                    return (max > 0 && cur >= max) || valText === '100%';
+                }
+                const textContent = document.body.innerText;
+                const m = textContent.match(/(?:Visual Search Streak|Visual Search|Tìm kiếm trực quan)[^\d]*(\d+)\s*\/\s*(\d+)/i);
+                if (m) {
+                    return parseInt(m[1]) >= parseInt(m[2]) && parseInt(m[2]) > 0;
+                }
+                return false;
+            }''')
 
-        # Tìm thẻ nhiệm vụ Visual Search trên Dashboard
-        target_page = page
-        context = page.context
-        card_selectors = [
-            'button:has-text("Visual Search")',
-            '[role="button"]:has-text("Visual Search")',
-            'button:has-text("Use an image to search")',
-            'button:has-text("Tìm kiếm bằng hình ảnh")',
-            'button:has-text("Tìm kiếm trực quan")',
-            'button:has([aria-label*="Visual Search" i])',
-        ]
+            if is_already_done:
+                logger.info("   [✓] Thẻ Visual Search đã hoàn thành (1/1)! Bỏ qua.")
+                logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
+                return True
 
-        card_clicked = False
-        for c_sel in card_selectors:
-            loc = page.locator(c_sel).first
-            if loc.count() > 0 and loc.is_visible(timeout=1000):
-                loc.scroll_into_view_if_needed(timeout=2000)
-                loc.click()
-                card_clicked = True
-                logger.info(f"   [*] Đã click thẻ Visual Search: {c_sel}")
-                page.wait_for_timeout(1500)
-                break
+            # Tạo mới họa tiết ngẫu nhiên cho file ảnh mẫu 100x100
+            create_random_sample_png(sample_img_path)
 
-        # Nếu popup modal bung ra ("Search now" / "Tìm kiếm ngay"), click để chuyển tab
-        search_now_loc = page.locator('a:has-text("Search now"), a:has-text("Tìm kiếm ngay"), a[href*="vsstreak"], a[href*="bing.com"]').first
-        if search_now_loc.count() > 0 and search_now_loc.is_visible(timeout=2000):
-            logger.info("   [*] Phát hiện nút 'Search now' kèm tracking link chiến dịch, đang mở tab Bing...")
+            # Truy cập thẳng trang: https://www.bing.com/visualsearch thay vì click camera
+            logger.info("   [*] Truy cập thẳng: https://www.bing.com/visualsearch ...")
             try:
-                with context.expect_page(timeout=5000) as new_page_info:
-                    search_now_loc.click()
-                target_page = new_page_info.value
+                page.goto("https://www.bing.com/visualsearch", wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(2000)
+                dismiss_popups(page)
+            except Exception as e:
+                logger.warning(f"   [!] Lỗi khi tải https://www.bing.com/visualsearch: {e}")
+
+            # Tìm thẻ input: page.locator("input[type='file']").first
+            file_input = page.locator("input[type='file']").first
+            try:
+                file_input.wait_for(state="attached", timeout=5000)
             except Exception:
-                if len(context.pages) > 1 and context.pages[-1] != page:
-                    target_page = context.pages[-1]
-                else:
-                    href = search_now_loc.get_attribute("href") or "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES"
-                    target_page.goto(href, wait_until="domcontentloaded")
-        elif "bing.com" not in target_page.url:
-            logger.info("   [*] Chuyển hướng sang Bing với tracking token Visual Search Streak...")
-            target_page.goto("https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES", wait_until="domcontentloaded")
+                pass
 
-        target_page.wait_for_load_state("domcontentloaded")
-        page.wait_for_timeout(2000)
-        dismiss_popups(target_page)
+            if file_input.count() > 0:
+                logger.info(f"   [*] Nạp file ảnh {sample_img_path} vào input[type='file']...")
+                file_input.set_input_files(sample_img_path)
+            else:
+                logger.warning("   [!] Không tìm thấy thẻ input[type='file'] trên bing.com/visualsearch.")
+                upload_btn = page.locator('#sb_fileinput, #sb_upload, .sbi_upload, span:has-text("tải lên"), span:has-text("upload"), input[type="file"]').first
+                if upload_btn.count() > 0:
+                    try:
+                        upload_btn.set_input_files(sample_img_path)
+                    except Exception:
+                        pass
 
-        # Bước 2: Mở hộp thoại Visual Search (Camera / Lens) trên bing.com
-        logger.info("   [2/4] Mở hộp thoại Visual Search (Camera) trên Bing...")
-        cam_selectors = [
-            '#sb_sbi',
-            '#sbi_b',
-            '.sbi_b',
-            '#sb_form_camera',
-            'div[aria-label="Tìm kiếm bằng hình ảnh"]',
-            'div[aria-label="Search using an image"]',
-            '[aria-label*="Search using an image" i]',
-        ]
-
-        cam_opened = False
-        for cam_sel in cam_selectors:
-            cam_btn = target_page.locator(cam_sel).first
-            if cam_btn.count() > 0 and cam_btn.is_visible(timeout=1000):
-                cam_btn.hover()
-                cam_btn.click(force=True)
-                cam_opened = True
-                logger.info(f"   [*] Đã click nút camera: {cam_sel}")
-                target_page.wait_for_timeout(2000)
-                break
-
-        if not cam_opened:
-            logger.warning("   [!] Không tìm thấy nút Camera trên Bing, thử mở trực tiếp qua opensbi...")
-            target_page.goto("https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES&opensbi=1", wait_until="domcontentloaded")
-            target_page.wait_for_timeout(2500)
-
-        # Bước 3: Thực hiện Visual Search bằng file ảnh thật (Tuyệt đối không redirect URL)
-        logger.info("   [3/4] Tải file ảnh mẫu thật lên Bing Visual Search...")
-        sample_img_path = create_random_sample_png()
-
-        search_success = False
-
-        # Phương thức 1: Upload ảnh thật qua <input type="file">
-        file_input = target_page.locator('#sb_fileinput, #sb_sbidialog input[type="file"], input[type="file"][accept*="image"]').first
-        if file_input.count() > 0:
-            logger.info(f"   [*] Nạp file ảnh {sample_img_path} vào input[type=file]...")
-            file_input.set_input_files(sample_img_path)
-            target_page.wait_for_timeout(2000)
-
-            # Thử thêm qua file chooser nếu cần kích hoạt nút tải lên
-            upload_btn = target_page.locator('#sb_brtext, #sb_upload, .sbi_upload, span:has-text("tải lên"), span:has-text("upload")').first
-            if upload_btn.is_visible(timeout=1000):
+            # Đợi trang kết quả phân tích ảnh xuất hiện (URL chứa iss=sbi hoặc xuất hiện .visual-search-results), giữ trang 5-7 giây
+            logger.info("   [*] Đợi kết quả phân tích ảnh xuất hiện (iss=sbi hoặc .visual-search-results)...")
+            try:
+                page.wait_for_url(lambda u: "iss=sbi" in u or "images/search" in u, timeout=10000)
+            except Exception:
                 try:
-                    with target_page.expect_file_chooser(timeout=3000) as fc_info:
-                        upload_btn.click()
-                    fc_info.value.set_files(sample_img_path)
-                    target_page.wait_for_timeout(2000)
+                    page.locator(".visual-search-results, [class*='visual-search'], #b_content").first.wait_for(state="visible", timeout=6000)
                 except Exception:
                     pass
 
-            # Xử lý tự động gửi form POST lên endpoint /images/search nếu script kblob bị nghẽn
-            target_page.evaluate('''() => {
-                const form = document.querySelector('#sbi_form');
-                if (form) {
-                    form.action = "/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP";
-                    form.method = "POST";
-                    form.submit();
+            # Giữ trang 5-7 giây để máy chủ Bing ghi nhận beacon
+            dwell_ms = random.randint(5000, 7000)
+            logger.info(f"   [*] Duy trì trang phân tích ảnh {dwell_ms/1000:.1f}s...")
+            page.wait_for_timeout(dwell_ms)
+
+            # Cuộn nhẹ trang kết quả
+            page.mouse.wheel(0, random.randint(300, 600))
+            page.wait_for_timeout(1500)
+
+            # Chạm nhẹ đồng xu góc nếu có
+            try:
+                tap_corner_rewards_coin(page, context_name="VisualSearch")
+            except Exception:
+                pass
+
+            # Quay lại Dashboard kiểm tra lại
+            logger.info("   [*] Quay lại Dashboard kiểm tra điểm Visual Search...")
+            page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(3000)
+            dismiss_popups(page)
+            claim_all_available_rewards(page)
+
+            status_check = page.evaluate(r'''() => {
+                const pb = document.querySelector('[role="progressbar"][aria-label*="Visual Search" i], [role="progressbar"][aria-label*="trực quan" i]');
+                if (pb) {
+                    const cur = parseFloat(pb.getAttribute('aria-valuenow') || '0');
+                    const max = parseFloat(pb.getAttribute('aria-valuemax') || '1');
+                    const valText = (pb.getAttribute('aria-valuetext') || '').trim();
+                    const done = (max > 0 && cur >= max) || valText === '100%';
+                    return { cur, max, valText, done };
                 }
+                const textContent = document.body.innerText;
+                const m = textContent.match(/(?:Visual Search Streak|Visual Search|Tìm kiếm trực quan)[^\d]*(\d+)\s*\/\s*(\d+)/i);
+                if (m) {
+                    const c = parseInt(m[1]), mx = parseInt(m[2]);
+                    return { cur: c, max: mx, valText: `${c}/${mx}`, done: c >= mx && mx > 0 };
+                }
+                return null;
             }''')
-            target_page.wait_for_timeout(4000)
-            search_success = True
 
-        # Phương thức 2 (Dự phòng): Click ảnh mẫu (Sample Image) có sẵn trong popup
-        if not search_success or ("detailv2" not in target_page.url and "images" not in target_page.url):
-            logger.info("   [*] Thử phương thức dự phòng: Click ảnh mẫu (Sample Image)...")
-            sample_img = target_page.locator('#sb_sbidialog img:not(.clsbtnimg):not(.infbtnimg), .sbi_sam_img, .sbi_try_item, [class*="sample"] img').first
-            if sample_img.count() > 0 and sample_img.is_visible(timeout=2000):
-                sample_img.click()
-                target_page.wait_for_timeout(3000)
-                search_success = True
+            if status_check and status_check.get("done"):
+                logger.info(f"   [✓] Visual Search đã nổ điểm thành công: {status_check.get('cur')}/{status_check.get('max')} [✓]!")
+                logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
+                return True
+            else:
+                cur_v = status_check.get('cur', 0) if status_check else 0
+                max_v = status_check.get('max', 1) if status_check else 1
+                logger.warning(f"   [✗] Thẻ Visual Search vẫn {cur_v}/{max_v} [✗] sau lần thử {attempt}.")
+                if attempt < max_attempts:
+                    logger.info("   [*] Nghỉ 3 giây trước khi thử lại...")
+                    page.wait_for_timeout(3000)
 
-        # Phương thức 3 (Dự phòng 2): Nhập link ảnh vào ô Paste URL và gõ phím thật + Enter
-        if not search_success or ("detailv2" not in target_page.url and "images" not in target_page.url):
-            logger.info("   [*] Thử phương thức dự phòng 2: Dán URL ảnh vào ô input...")
-            pst_input = target_page.locator('#sb_imgpst, #sb_sbi_ipt, input[placeholder*="dán" i], input[placeholder*="paste" i]').first
-            if pst_input.count() > 0 and pst_input.is_visible(timeout=2000):
-                sample_url = "https://images.unsplash.com/photo-1546527868-ccb7ee7dfa6a"
-                pst_input.click()
-                target_page.keyboard.type(sample_url, delay=40)
-                target_page.wait_for_timeout(500)
-                target_page.keyboard.press("Enter")
-                target_page.wait_for_timeout(3000)
-
-        # Bước 4: Tương tác trên trang kết quả Visual Search & Chốt điểm
-        logger.info(f"   [4/4] Tương tác trang kết quả Visual Search (URL hiện tại: {target_page.url[:80]})...")
-        target_page.wait_for_load_state("domcontentloaded")
-        # Giữ trang 5-6 giây để telemetry beacon của Bing Visual Search gửi xong
-        target_page.wait_for_timeout(5500)
-
-        # Cuộn nhẹ trang kết quả
-        target_page.mouse.wheel(0, 300)
-        target_page.wait_for_timeout(1000)
-
-        # Click vào 1 ảnh kết quả tương tự nếu có
-        matched_img = target_page.locator('.iusc, a[href*="detailv2"], a.iusc, #b_content img, .imgpt a, .mimg, [class*="visual-match"]').first
-        if matched_img.count() > 0 and matched_img.is_visible(timeout=2000):
-            try:
-                matched_img.click(timeout=3000)
-                logger.info("   [*] Đã click 1 ảnh kết quả tương tự (Visual Match).")
-                target_page.wait_for_timeout(3000)
-            except Exception:
-                pass
-
-        # Chạm đồng xu Rewards ở góc màn hình
-        tap_corner_rewards_coin(target_page, context_name="Visual-Search")
-        target_page.wait_for_timeout(2000)
-
-        # Đóng tab phụ nếu có mở tab mới
-        if target_page != page:
-            logger.info("   [*] Đóng tab phụ Visual Search...")
-            try:
-                target_page.close()
-            except Exception:
-                pass
-
-        # Quay về Dashboard, reload trang và Claim điểm thưởng
-        logger.info("   [*] Quay về Rewards Dashboard để nhận thưởng...")
-        page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(3000)
-        dismiss_popups(page)
-
-        claimed_pts = claim_all_available_rewards(page)
-        if claimed_pts > 0:
-            logger.info(f"   [✓] Đã claim thành công {claimed_pts} phần thưởng từ Dashboard!")
-
-        # Kiểm tra lại trạng thái thẻ
-        final_check = page.evaluate('''() => {
-            const pb = document.querySelector('[aria-label="Visual Search"], [aria-label*="trực quan" i]');
-            if (pb) {
-                return {
-                    val: pb.getAttribute('aria-valuenow'),
-                    max: pb.getAttribute('aria-valuemax'),
-                    text: pb.getAttribute('aria-valuetext')
-                };
-            }
-            return null;
-        }''')
-        if final_check:
-            status_icon = "✓" if (final_check.get("val") == final_check.get("max") or final_check.get("text") == "100%") else "✗"
-            logger.info(f"   [{status_icon}] Tiến độ Thẻ Visual Search sau cùng: {final_check.get('val')}/{final_check.get('max')} ({final_check.get('text')})")
-
-        logger.info("   [✓] Hoàn thành luồng Visual Search Streak chuẩn xác!")
+        # Nếu sau 3 lần thử vẫn không được
+        visual_failed = True
+        logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
+        logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
+        return False
 
     except Exception as e:
-        logger.warning(f"   [!] Bỏ qua Visual Search do lỗi: {e}")
-    finally:
+        visual_failed = True
+        logger.warning(f"   [!] Lỗi trong quá trình xử lý Visual Search: {e}")
+        logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
         logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
+        return False
+
+
+solve_visual_search_streak = handle_visual_search_streak
 
 
 def get_daily_search_progress(page: Page) -> dict:
     """
-    Đọc tiến độ tìm kiếm thực tế và 5 thẻ nhiệm vụ ngày từ Rewards Dashboard & Points Breakdown.
-    Trả về: {"pc_cur": int, "pc_max": int, "mobile_cur": int, "mobile_max": int, "all_maxed": bool, "activities": dict, "all_activities_done": bool}
+    Đọc tiến độ tìm kiếm thực tế và các thẻ nhiệm vụ từ Microsoft Rewards.
+    Trích xuất chính xác các con số từ khu vực thống kê chi tiết Points breakdown:
+      - Desktop Bing search / Tìm kiếm trên máy tính: pc_current / pc_max
+      - Mobile Bing search / Tìm kiếm trên điện thoại: mobile_current / mobile_max
+    Tuyệt đối không tự suy diễn điểm nếu không đọc được DOM thực tế.
+    Trả về: {
+        "pc_cur": int, "pc_current": int, "pc_max": int,
+        "mobile_cur": int, "mobile_current": int, "mobile_max": int,
+        "found_pc": bool, "found_mobile": bool,
+        "all_maxed": bool,
+        "activities": dict,
+        "all_activities_done": bool
+    }
     """
     logger.info("[Dashboard] Đang đọc tiến độ điểm tìm kiếm thực tế từ tài khoản...")
     progress = {
-        "pc_cur": 0, "pc_max": 90,
-        "mobile_cur": 0, "mobile_max": 60,
+        "pc_cur": 0, "pc_current": 0, "pc_max": 90,
+        "mobile_cur": 0, "mobile_current": 0, "mobile_max": 60,
+        "found_pc": False,
+        "found_mobile": False,
         "all_maxed": False,
         "activities": {},
         "all_activities_done": False
     }
 
     try:
-        # Bước A: Kiểm tra 5 thẻ nhiệm vụ ngày trên Dashboard chính (rewards.bing.com)
-        if "rewards.bing.com" not in page.url or "modal" in page.url:
-            page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=12000)
+        # Bước A: Điều hướng tới https://rewards.bing.com/earn (nơi hiển thị cả Streaks và Points breakdown)
+        if "rewards.bing.com/earn" not in page.url:
+            page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
             page.wait_for_timeout(2000)
         dismiss_popups(page)
 
+        # 1. Đọc 5 thẻ nhiệm vụ / chuỗi streak ngày (Bing Search, Daily Set, Edge Browsing, Mobile App, Visual Search)
         act_data = page.evaluate(r"""() => {
             const result = {
                 activities: {
@@ -1947,87 +1918,78 @@ def get_daily_search_progress(page: Page) -> dict:
                     'Mobile App': { cur: 0, max: 1, done: false },
                     'Visual Search': { cur: 0, max: 1, done: false }
                 },
-                found_count: 0,
-                all_done: false
+                found_count: 0
             };
 
             // 1. Kiểm tra qua các progressbar (React-Aria UI mới)
             const bars = document.querySelectorAll('[role="progressbar"]');
             bars.forEach(bar => {
-                const label = (bar.getAttribute('aria-label') || '').trim();
+                const label = (bar.getAttribute('aria-label') || '').trim().toLowerCase();
                 const cur = parseFloat(bar.getAttribute('aria-valuenow') || '0');
                 const max = parseFloat(bar.getAttribute('aria-valuemax') || '0');
-                const valText = bar.getAttribute('aria-valuetext') || '';
-                const is100 = (max > 0 && cur >= max) || valText.trim() === '100%';
+                const valText = (bar.getAttribute('aria-valuetext') || '').trim();
+                const is100 = (max > 0 && cur >= max) || valText === '100%';
 
-                const labelLower = label.toLowerCase();
-                if (labelLower.includes('bing') && !labelLower.includes('star')) {
+                if (label.includes('bing') && !label.includes('star')) {
                     result.activities['Bing Search'] = { cur, max, done: is100 };
                     result.found_count++;
-                } else if (labelLower.includes('daily set') || labelLower.includes('bộ hằng ngày')) {
+                } else if (label.includes('daily set') || label.includes('bộ hằng ngày')) {
                     result.activities['Daily Set'] = { cur, max, done: is100 };
                     result.found_count++;
-                } else if (labelLower.includes('edge')) {
+                } else if (label.includes('edge')) {
                     result.activities['Edge Browsing'] = { cur, max, done: is100 };
                     result.found_count++;
-                } else if (labelLower.includes('mobile app') || labelLower.includes('ứng dụng')) {
+                } else if (label.includes('mobile app') || label.includes('bing app') || label.includes('ứng dụng')) {
                     result.activities['Mobile App'] = { cur, max, done: is100 };
                     result.found_count++;
-                } else if (labelLower.includes('visual search') || labelLower.includes('trực quan')) {
+                } else if (label.includes('visual search') || label.includes('trực quan')) {
                     result.activities['Visual Search'] = { cur, max, done: is100 };
                     result.found_count++;
                 }
             });
 
-            // 2. Fallback text content cho 5 thẻ
+            // 2. Fallback text content cho 5 thẻ Streak
             const textContent = document.body.innerText;
             if (result.found_count < 5) {
-                const bingM = textContent.match(/Bing[^\d]*Search:\s*(\d+)\s*\/\s*(\d+)/i) ||
-                              textContent.match(/Bing[^\d]*Tìm kiếm:\s*(\d+)\s*\/\s*(\d+)/i);
+                const bingM = textContent.match(/(?:Bing Search Streak|Bing Search|Tìm kiếm Bing)[^\d]*(\d+)\s*\/\s*(\d+)/i) ||
+                              textContent.match(/Search:\s*(\d+)\s*\/\s*(\d+)/i);
                 if (bingM && !result.activities['Bing Search'].done) {
                     const c = parseInt(bingM[1]), m = parseInt(bingM[2]);
                     result.activities['Bing Search'] = { cur: c, max: m, done: c >= m && m > 0 };
                     result.found_count++;
                 }
-                const dsM = textContent.match(/Daily Set[^\d]*Activity:\s*(\d+)\s*\/\s*(\d+)/i) ||
-                            textContent.match(/Bộ hằng ngày[^\d]*(?:Hoạt động|Nhiệm vụ):\s*(\d+)\s*\/\s*(\d+)/i);
+                const dsM = textContent.match(/(?:Daily Set Streak|Daily Set|Bộ hằng ngày)[^\d]*(\d+)\s*\/\s*(\d+)/i) ||
+                            textContent.match(/Activity:\s*(\d+)\s*\/\s*(\d+)/i);
                 if (dsM && !result.activities['Daily Set'].done) {
                     const c = parseInt(dsM[1]), m = parseInt(dsM[2]);
                     result.activities['Daily Set'] = { cur: c, max: m, done: c >= m && m > 0 };
                     result.found_count++;
                 }
-                const edgeM = textContent.match(/Edge[^\d]*Minutes:\s*(\d+)\s*\/\s*(\d+)/i) ||
-                              textContent.match(/Edge[^\d]*Phút:\s*(\d+)\s*\/\s*(\d+)/i);
+                const edgeM = textContent.match(/(?:Edge Browsing Streak|Edge Browsing|Duyệt web Edge)[^\d]*(\d+)\s*\/\s*(\d+)/i) ||
+                              textContent.match(/Minutes:\s*(\d+)\s*\/\s*(\d+)/i);
                 if (edgeM && !result.activities['Edge Browsing'].done) {
                     const c = parseInt(edgeM[1]), m = parseInt(edgeM[2]);
                     result.activities['Edge Browsing'] = { cur: c, max: m, done: c >= m && m > 0 };
                     result.found_count++;
                 }
-                const mobM = textContent.match(/Mobile App[^\d]*Check-in:\s*(\d+)\s*\/\s*(\d+)/i) ||
-                             textContent.match(/Ứng dụng di động[^\d]*Điểm danh:\s*(\d+)\s*\/\s*(\d+)/i);
+                const mobM = textContent.match(/(?:Bing App Streak|Mobile App|Ứng dụng di động)[^\d]*(\d+)\s*\/\s*(\d+)/i) ||
+                             textContent.match(/Check-in:\s*(\d+)\s*\/\s*(\d+)/i);
                 if (mobM && !result.activities['Mobile App'].done) {
                     const c = parseInt(mobM[1]), m = parseInt(mobM[2]);
                     result.activities['Mobile App'] = { cur: c, max: m, done: c >= m && m > 0 };
                     result.found_count++;
                 }
-                const visM = textContent.match(/Visual Search[^\d]*Activity:\s*(\d+)\s*\/\s*(\d+)/i) ||
-                             textContent.match(/Tìm kiếm trực quan[^\d]*(?:Hoạt động|Nhiệm vụ):\s*(\d+)\s*\/\s*(\d+)/i);
+                const visM = textContent.match(/(?:Visual Search Streak|Visual Search|Tìm kiếm trực quan)[^\d]*(\d+)\s*\/\s*(\d+)/i);
                 if (visM && !result.activities['Visual Search'].done) {
                     const c = parseInt(visM[1]), m = parseInt(visM[2]);
                     result.activities['Visual Search'] = { cur: c, max: m, done: c >= m && m > 0 };
                     result.found_count++;
                 }
             }
-
-            // Chỉ coi là all_done khi TẤT CẢ 5 thẻ nhiệm vụ ngày đều đã đạt done === true
-            const allDone = Object.values(result.activities).every(a => a.done);
-            result.all_done = (result.found_count >= 5) && allDone;
             return result;
         }""")
 
         progress["activities"] = act_data.get("activities", {})
-
-        # Sửa lại điều kiện all_activities_done: Chỉ True khi TẤT CẢ 5 thẻ (bao gồm Visual Search) đều đạt [✓]
         all_act = progress["activities"]
         all_five_done = (
             len(all_act) == 5 and
@@ -2043,86 +2005,103 @@ def get_daily_search_progress(page: Page) -> dict:
             uncompleted = [k for k, v in all_act.items() if not v.get("done", False)]
             logger.info(f"[Dashboard] Còn {len(uncompleted)} thẻ chưa hoàn thành: {', '.join(uncompleted)} -> all_activities_done = False")
 
-        # Bước B: Kiểm tra points breakdown qua popup / URL pointsbreakdown
-        try:
-            page.goto("https://rewards.bing.com/pointsbreakdown", wait_until="domcontentloaded", timeout=12000)
-            page.wait_for_timeout(2000)
-            dismiss_popups(page)
+        # Bước B: Mở drawer/popup Points breakdown để trích xuất dữ liệu thực tế
+        body_text = page.inner_text("body")
+        has_breakdown_text = any(k in body_text for k in [
+            "Desktop Bing search", "Mobile Bing search",
+            "Tìm kiếm trên máy tính", "Tìm kiếm trên điện thoại"
+        ])
 
-            # Trích xuất các chỉ số điểm x/y qua evaluate DOM
-            breakdown_data = page.evaluate(r"""() => {
-                const result = {};
-                const textContent = document.body.innerText;
-
-                // Tìm các đoạn dạng PC search 90 / 90 hoặc 90/90
-                const pcMatch = textContent.match(/(?:PC search|Tìm kiếm trên PC|Tìm kiếm trên máy tính)[^\d]*(\d+)\s*\/\s*(\d+)/i);
-                if (pcMatch) {
-                    result.pc_cur = parseInt(pcMatch[1]);
-                    result.pc_max = parseInt(pcMatch[2]);
-                }
-
-                // Tìm Mobile search
-                const mobMatch = textContent.match(/(?:Mobile search|Tìm kiếm trên thiết bị di động|Tìm kiếm trên di động)[^\d]*(\d+)\s*\/\s*(\d+)/i);
-                if (mobMatch) {
-                    result.mob_cur = parseInt(mobMatch[1]);
-                    result.mob_max = parseInt(mobMatch[2]);
-                }
-
-                // Kiểm tra các phần tử card cụ thể nếu regex text không bắt được
-                const cards = document.querySelectorAll('div[class*="pointsDetail"], div[class*="progress"], mee-rewards-points-breakdown-card');
-                cards.forEach(card => {
-                    const txt = card.innerText || '';
-                    const m = txt.match(/(\d+)\s*\/\s*(\d+)/);
-                    if (m) {
-                        const c = parseInt(m[1]), mx = parseInt(m[2]);
-                        if (txt.toLowerCase().includes('pc') && !result.pc_cur) {
-                            result.pc_cur = c; result.pc_max = mx;
-                        } else if ((txt.toLowerCase().includes('mobile') || txt.toLowerCase().includes('di động')) && !result.mob_cur) {
-                            result.mob_cur = c; result.mob_max = mx;
-                        }
+        if not has_breakdown_text:
+            clicked = page.evaluate("""() => {
+                const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+                for (const btn of buttons) {
+                    const txt = (btn.innerText || '').toLowerCase();
+                    if (txt.includes('points breakdown') || txt.includes('chi tiết điểm')) {
+                        btn.click();
+                        return true;
                     }
-                });
-
-                return result;
+                }
+                return false;
             }""")
+            if clicked:
+                page.wait_for_timeout(1500)
+                body_text = page.inner_text("body")
 
-            found_pc = False
-            found_mob = False
+        # Regex quét chính xác chuỗi dạng (\d+)\s*/\s*(\d+) đi kèm ngay sau các từ khóa trạng thái
+        pc_pattern = r"(?:Desktop Bing search|Tìm kiếm trên máy tính|Tìm kiếm trên PC|PC search|Desktop search|PC Bing search)[\s\S]{0,100}?(\d+)\s*/\s*(\d+)"
+        mob_pattern = r"(?:Mobile Bing search|Tìm kiếm trên điện thoại|Tìm kiếm trên thiết bị di động|Tìm kiếm trên di động|Mobile search|Mobile App search)[\s\S]{0,100}?(\d+)\s*/\s*(\d+)"
 
-            if "pc_cur" in breakdown_data and "pc_max" in breakdown_data:
-                progress["pc_cur"] = breakdown_data["pc_cur"]
-                progress["pc_max"] = breakdown_data["pc_max"]
-                found_pc = True
+        m_pc = re.search(pc_pattern, body_text, re.IGNORECASE)
+        if m_pc:
+            c = int(m_pc.group(1))
+            mx = int(m_pc.group(2))
+            progress["pc_cur"] = c
+            progress["pc_current"] = c
+            progress["pc_max"] = mx
+            progress["found_pc"] = True
+        else:
+            # Fallback DOM thẻ cũ (nếu có)
+            fallback_pc = page.evaluate(r"""() => {
+                const cards = document.querySelectorAll('div[class*="pointsDetail"], mee-rewards-points-breakdown-card');
+                for (const card of cards) {
+                    const txt = card.innerText || '';
+                    if (txt.toLowerCase().includes('pc') || txt.toLowerCase().includes('máy tính')) {
+                        const m = txt.match(/(\d+)\s*\/\s*(\d+)/);
+                        if (m) return { cur: parseInt(m[1]), max: parseInt(m[2]) };
+                    }
+                }
+                return null;
+            }""")
+            if fallback_pc:
+                progress["pc_cur"] = fallback_pc["cur"]
+                progress["pc_current"] = fallback_pc["cur"]
+                progress["pc_max"] = fallback_pc["max"]
+                progress["found_pc"] = True
+            else:
+                logger.warning("[Dashboard] Không tìm thấy DOM thống kê 'Desktop Bing search' trong Points breakdown!")
 
-            if "mob_cur" in breakdown_data and "mob_max" in breakdown_data:
-                progress["mobile_cur"] = breakdown_data["mob_cur"]
-                progress["mobile_max"] = breakdown_data["mob_max"]
-                found_mob = True
+        m_mob = re.search(mob_pattern, body_text, re.IGNORECASE)
+        if m_mob:
+            c = int(m_mob.group(1))
+            mx = int(m_mob.group(2))
+            progress["mobile_cur"] = c
+            progress["mobile_current"] = c
+            progress["mobile_max"] = mx
+            progress["found_mobile"] = True
+        else:
+            # Fallback DOM thẻ cũ (nếu có)
+            fallback_mob = page.evaluate(r"""() => {
+                const cards = document.querySelectorAll('div[class*="pointsDetail"], mee-rewards-points-breakdown-card');
+                for (const card of cards) {
+                    const txt = card.innerText || '';
+                    if (txt.toLowerCase().includes('mobile') || txt.toLowerCase().includes('điện thoại')) {
+                        const m = txt.match(/(\d+)\s*\/\s*(\d+)/);
+                        if (m) return { cur: parseInt(m[1]), max: parseInt(m[2]) };
+                    }
+                }
+                return null;
+            }""")
+            if fallback_mob:
+                progress["mobile_cur"] = fallback_mob["cur"]
+                progress["mobile_current"] = fallback_mob["cur"]
+                progress["mobile_max"] = fallback_mob["max"]
+                progress["found_mobile"] = True
+            else:
+                logger.warning("[Dashboard] Không tìm thấy DOM thống kê 'Mobile Bing search' trong Points breakdown!")
 
-            # Nếu giao diện không hiển thị bảng số PC/Mobile riêng biệt (giao diện mới 2026),
-            # đối chiếu theo 5 thẻ nhiệm vụ ngày:
-            if not found_pc and not found_mob:
-                bing_done = progress["activities"].get("Bing Search", {}).get("done", False)
-                mob_done = progress["activities"].get("Mobile App", {}).get("done", False)
+        # Đóng nhẹ drawer nếu đang mở để trả lại giao diện sạch
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
 
-                if progress["all_activities_done"]:
-                    progress["pc_cur"] = progress["pc_max"]
-                    progress["mobile_cur"] = progress["mobile_max"]
-                    logger.info("[Dashboard] Giao diện mới: Tất cả 5 thẻ nhiệm vụ ngày đã hoàn thành 100% -> Điểm tìm kiếm đạt tối đa.")
-                else:
-                    if bing_done:
-                        progress["pc_cur"] = progress["pc_max"]
-                    if mob_done:
-                        progress["mobile_cur"] = progress["mobile_max"]
+        # CHỈ COI LÀ ALL_MAXED KHI VÀ CHỈ KHI DỮ LIỆU THỰC TẾ XÁC NHẬN CẢ PC VÀ MOBILE ĐÃ ĐẠT ĐỈNH
+        if progress["found_pc"] and progress["found_mobile"]:
+            if progress["pc_cur"] >= progress["pc_max"] and progress["mobile_cur"] >= progress["mobile_max"]:
+                progress["all_maxed"] = True
 
-        except Exception as e:
-            logger.warning(f"[Dashboard] Không thể đọc points breakdown: {e}")
-
-        logger.info(f"[Dashboard] Tiến độ điểm PC: {progress['pc_cur']}/{progress['pc_max']} | Mobile: {progress['mobile_cur']}/{progress['mobile_max']}")
-
-        # Nếu cả 2 đều đã chạm mốc tối đa
-        if progress["pc_cur"] >= progress["pc_max"] and progress["mobile_cur"] >= progress["mobile_max"]:
-            progress["all_maxed"] = True
+        logger.info(f"[Dashboard] Dữ liệu thực tế: Desktop: {progress['pc_cur']}/{progress['pc_max']} (found={progress['found_pc']}) | Mobile: {progress['mobile_cur']}/{progress['mobile_max']} (found={progress['found_mobile']}) | all_maxed={progress['all_maxed']}")
 
     except Exception as e:
         logger.warning(f"[Dashboard] Lỗi khi kiểm tra tiến độ ngày: {e}")
