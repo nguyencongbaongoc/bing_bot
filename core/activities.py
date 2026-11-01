@@ -1678,6 +1678,48 @@ def solve_promotional_links(page: Page):
         logger.info("--- KẾT THÚC: PROMOTIONAL LINKS ---\n")
 
 
+def get_random_screenshot_path() -> Path | None:
+    """
+    Quét và trả về đường dẫn 1 file ảnh ngẫu nhiên từ thư mục screenshot.
+    """
+    candidate_dirs = [
+        Path("./screenshot"),
+        Path("./screenshots"),
+        Path("./screen shot"),
+        Path("./Screenshot"),
+        Path("./Screenshots"),
+        Path("./data/screenshot"),
+        Path("./data/screenshots"),
+    ]
+    
+    valid_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    all_images = []
+    seen_dirs = set()
+
+    for c_dir in candidate_dirs:
+        if c_dir.exists() and c_dir.is_dir():
+            resolved_dir = c_dir.resolve()
+            if resolved_dir in seen_dirs:
+                continue
+            seen_dirs.add(resolved_dir)
+            for f in c_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in valid_extensions:
+                    # Chỉ lấy ảnh có dung lượng trên 10KB để đảm bảo Bing nhận diện tốt
+                    try:
+                        if f.stat().st_size >= 10240:
+                            all_images.append(f.resolve())
+                    except OSError:
+                        continue
+
+    if all_images:
+        selected = random.choice(all_images)
+        logger.info(f"   [Visual Search] Đã chọn ngẫu nhiên ảnh: '{selected.name}' ({round(selected.stat().st_size / 1024, 1)} KB)")
+        return selected
+
+    logger.warning("   [Visual Search] Không tìm thấy ảnh hợp lệ trong thư mục screenshot!")
+    return None
+
+
 def create_random_sample_png(filepath: str = "data/visual_sample.png") -> str:
     """Tạo một file ảnh PNG 100x100 RGB hợp lệ có họa tiết màu ngẫu nhiên mỗi lần chạy."""
     path = Path(filepath)
@@ -1716,56 +1758,97 @@ def ensure_sample_image(filepath: str = "data/visual_sample.png") -> str:
     return str(p.resolve())
 
 
+def read_visual_search_streak_status(page: Page) -> dict:
+    """Đọc chính xác trạng thái thẻ Visual Search Streak trên https://rewards.bing.com/earn."""
+    try:
+        return page.evaluate(r'''() => {
+            // 1. Kiểm tra qua các progressbar (nếu có aria-label tương ứng)
+            const bars = document.querySelectorAll('[role="progressbar"]');
+            for (const bar of bars) {
+                const label = (bar.getAttribute('aria-label') || '').trim().toLowerCase();
+                if (label.includes('visual search') || label.includes('trực quan')) {
+                    const cur = parseFloat(bar.getAttribute('aria-valuenow') || '0');
+                    const max = parseFloat(bar.getAttribute('aria-valuemax') || '1');
+                    const valText = (bar.getAttribute('aria-valuetext') || '').trim();
+                    const done = (max > 0 && cur >= max) || valText === '100%';
+                    return { cur, max, done };
+                }
+            }
+
+            // 2. Tìm container của thẻ Visual Search Streak (thường có text 'Visual Search Streak' và 'Activity: 1/1')
+            const allDivs = document.querySelectorAll('div');
+            for (const d of allDivs) {
+                const txt = (d.innerText || '').trim();
+                if ((txt.startsWith('Visual Search Streak') || txt.startsWith('Tìm kiếm trực quan')) && txt.length < 350) {
+                    const matches = Array.from(txt.matchAll(/(\d+)\s*\/\s*(\d+)/g));
+                    if (matches.length > 0) {
+                        const lastM = matches[matches.length - 1];
+                        const c = parseInt(lastM[1]), mx = parseInt(lastM[2]);
+                        return { cur: c, max: mx, done: mx > 0 && c >= mx };
+                    }
+                }
+            }
+
+            // 3. Fallback tìm theo substring 'Visual Search' trong body
+            const textContent = document.body.innerText;
+            const idx = textContent.indexOf('Visual Search');
+            if (idx !== -1) {
+                const sub = textContent.slice(idx, idx + 300);
+                const matches = Array.from(sub.matchAll(/(\d+)\s*\/\s*(\d+)/g));
+                if (matches.length > 0) {
+                    const lastM = matches[matches.length - 1];
+                    const c = parseInt(lastM[1]), mx = parseInt(lastM[2]);
+                    return { cur: c, max: mx, done: mx > 0 && c >= mx };
+                }
+            }
+
+            return { cur: 0, max: 1, done: false };
+        }''')
+    except Exception:
+        return {"cur": 0, "max": 1, "done": False}
+
+
 def handle_visual_search_streak(page: Page) -> bool:
     """
     Thực hiện Visual Search Streak:
-    1. Đảm bảo file ảnh mẫu data/visual_sample.png tồn tại (tạo PNG 100x100 hợp lệ).
+    1. Quét lấy 1 ảnh ngẫu nhiên từ thư mục screenshot (hoặc fallback chụp màn hình hiện tại).
     2. Truy cập thẳng trang: https://www.bing.com/visualsearch thay vì click camera.
-    3. Tìm thẻ input: page.locator("input[type='file']").first.
-    4. Nạp file: page.locator("input[type='file']").first.set_input_files(image_path).
-    5. Đợi trang kết quả phân tích ảnh xuất hiện (URL chứa iss=sbi hoặc .visual-search-results), giữ trang 5-7s.
+    3. Định vị input[type='file'] và nạp ảnh thực tế vào.
+    4. Chờ URL chuyển sang iss=sbi hoặc xuất hiện selector .visual-search-results (timeout 8-10 giây).
+    5. Cuộn nhẹ trang kết quả và click vào một mục kết quả tương tự để hoàn tất chu trình kích hoạt beacon.
     6. Quay lại Dashboard kiểm tra lại: Nếu thẻ Visual Search vẫn 0/1 [✗], thử lại tối đa 2 lần nữa (tổng 3 lần).
        Nếu vẫn không được, ghi log cảnh báo [WARNING] Visual Search chưa nổ điểm sau 3 lần thử và cắm cờ visual_failed = True.
     """
     logger.info("--- BẮT ĐẦU: VISUAL SEARCH STREAK (TRUY CẬP TRỰC TIẾP & UPLOAD ẢNH) ---")
     visual_failed = False
     max_attempts = 3
-    sample_img_path = ensure_sample_image("data/visual_sample.png")
 
     try:
         from core.activities import dismiss_popups, claim_all_available_rewards, tap_corner_rewards_coin
 
         for attempt in range(1, max_attempts + 1):
             logger.info(f"[*] Visual Search - Lần thử {attempt}/{max_attempts}...")
-            # Kiểm tra xem trên Dashboard đã hoàn thành từ trước hay chưa
-            if "rewards.bing.com" not in page.url:
+            # Luôn kiểm tra chính xác tại trang https://rewards.bing.com/earn
+            if "rewards.bing.com/earn" not in page.url:
                 page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_timeout(2000)
             dismiss_popups(page)
 
-            is_already_done = page.evaluate(r'''() => {
-                const pb = document.querySelector('[role="progressbar"][aria-label*="Visual Search" i], [role="progressbar"][aria-label*="trực quan" i]');
-                if (pb) {
-                    const cur = parseFloat(pb.getAttribute('aria-valuenow') || '0');
-                    const max = parseFloat(pb.getAttribute('aria-valuemax') || '1');
-                    const valText = (pb.getAttribute('aria-valuetext') || '').trim();
-                    return (max > 0 && cur >= max) || valText === '100%';
-                }
-                const textContent = document.body.innerText;
-                const m = textContent.match(/(?:Visual Search Streak|Visual Search|Tìm kiếm trực quan)[^\d]*(\d+)\s*\/\s*(\d+)/i);
-                if (m) {
-                    return parseInt(m[1]) >= parseInt(m[2]) && parseInt(m[2]) > 0;
-                }
-                return false;
-            }''')
+            status_initial = read_visual_search_streak_status(page)
 
-            if is_already_done:
-                logger.info("   [✓] Thẻ Visual Search đã hoàn thành (1/1)! Bỏ qua.")
+            if status_initial and status_initial.get("done"):
+                logger.info(f"   [✓] Thẻ Visual Search đã hoàn thành ({status_initial.get('cur')}/{status_initial.get('max')})! Bỏ qua.")
                 logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
                 return True
 
-            # Tạo mới họa tiết ngẫu nhiên cho file ảnh mẫu 100x100
-            create_random_sample_png(sample_img_path)
+            # Lấy ảnh ngẫu nhiên từ thư mục screenshot hoặc fallback an toàn
+            img_path = get_random_screenshot_path()
+            if not img_path or not img_path.exists():
+                fallback_path = Path("./data/temp_viewport_capture.png").resolve()
+                fallback_path.parent.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(fallback_path))
+                img_path = fallback_path
+                logger.info(f"   [Visual Search] Sử dụng fallback chụp viewport: '{img_path.name}'")
 
             # Truy cập thẳng trang: https://www.bing.com/visualsearch thay vì click camera
             logger.info("   [*] Truy cập thẳng: https://www.bing.com/visualsearch ...")
@@ -1777,42 +1860,84 @@ def handle_visual_search_streak(page: Page) -> bool:
                 logger.warning(f"   [!] Lỗi khi tải https://www.bing.com/visualsearch: {e}")
 
             # Tìm thẻ input: page.locator("input[type='file']").first
-            file_input = page.locator("input[type='file']").first
+            input_file = page.locator("input[type='file']").first
             try:
-                file_input.wait_for(state="attached", timeout=5000)
+                input_file.wait_for(state="attached", timeout=5000)
             except Exception:
                 pass
 
-            if file_input.count() > 0:
-                logger.info(f"   [*] Nạp file ảnh {sample_img_path} vào input[type='file']...")
-                file_input.set_input_files(sample_img_path)
+            if input_file.count() > 0:
+                logger.info(f"   [*] Nạp file ảnh {img_path} vào input[type='file']...")
+                input_file.set_input_files(str(img_path))
             else:
                 logger.warning("   [!] Không tìm thấy thẻ input[type='file'] trên bing.com/visualsearch.")
                 upload_btn = page.locator('#sb_fileinput, #sb_upload, .sbi_upload, span:has-text("tải lên"), span:has-text("upload"), input[type="file"]').first
                 if upload_btn.count() > 0:
                     try:
-                        upload_btn.set_input_files(sample_img_path)
+                        upload_btn.set_input_files(str(img_path))
                     except Exception:
                         pass
 
-            # Đợi trang kết quả phân tích ảnh xuất hiện (URL chứa iss=sbi hoặc xuất hiện .visual-search-results), giữ trang 5-7 giây
+            # Giữ trang chờ phân tích: Chờ URL chuyển sang SBIVSP, iss=sbi, images hoặc xuất hiện selector .visual-search-results (timeout 8–10 giây)
             logger.info("   [*] Đợi kết quả phân tích ảnh xuất hiện (iss=sbi hoặc .visual-search-results)...")
             try:
-                page.wait_for_url(lambda u: "iss=sbi" in u or "images/search" in u, timeout=10000)
+                page.wait_for_url(lambda u: "visualsearch" not in u and ("SBIVSP" in u or "iss=" in u or "images" in u or "search" in u), timeout=10000)
             except Exception:
-                try:
-                    page.locator(".visual-search-results, [class*='visual-search'], #b_content").first.wait_for(state="visible", timeout=6000)
-                except Exception:
-                    pass
+                pass
 
-            # Giữ trang 5-7 giây để máy chủ Bing ghi nhận beacon
-            dwell_ms = random.randint(5000, 7000)
+            try:
+                page.locator(".visual-search-results, [class*='visual-search'], .imgpt, a.iusc, #b_content, #b_results, #vs_content").first.wait_for(state="visible", timeout=8000)
+            except Exception:
+                pass
+
+            # Giữ trang để máy chủ Bing phân tích
+            dwell_ms = random.randint(4000, 6000)
             logger.info(f"   [*] Duy trì trang phân tích ảnh {dwell_ms/1000:.1f}s...")
             page.wait_for_timeout(dwell_ms)
 
             # Cuộn nhẹ trang kết quả
+            logger.info("   [*] Cuộn nhẹ trang kết quả...")
             page.mouse.wheel(0, random.randint(300, 600))
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(random.randint(1500, 2500))
+
+            # Click vào một mục kết quả tương tự để hoàn tất chu trình kích hoạt beacon
+            try:
+                similar_selectors = [
+                    ".imgpt a",
+                    "a.iusc",
+                    "#b_results a",
+                    ".visual-search-results a",
+                    "[class*='visual-search'] a",
+                    ".vs_items a",
+                    ".vsl_card",
+                    ".insights-card a",
+                    "#vs_results a"
+                ]
+                clicked_item = False
+                for sel in similar_selectors:
+                    items = page.locator(sel)
+                    count = items.count()
+                    if count > 0:
+                        for idx in range(min(count, 4)):
+                            target = items.nth(idx)
+                            try:
+                                target.scroll_into_view_if_needed(timeout=2000)
+                                logger.info(f"   [*] Click vào một mục kết quả tương tự ({sel})...")
+                                target.hover()
+                                page.wait_for_timeout(300)
+                                target.click(force=True, timeout=3000)
+                                clicked_item = True
+                                break
+                            except Exception:
+                                continue
+                    if clicked_item:
+                        break
+                if clicked_item:
+                    page.wait_for_timeout(random.randint(2500, 4000))
+                else:
+                    logger.debug("   [Visual Search] Không tìm thấy thẻ kết quả tương tự để click trực tiếp.")
+            except Exception as e:
+                logger.debug(f"   [Visual Search] Bỏ qua lỗi click kết quả tương tự: {e}")
 
             # Chạm nhẹ đồng xu góc nếu có
             try:
@@ -1827,23 +1952,7 @@ def handle_visual_search_streak(page: Page) -> bool:
             dismiss_popups(page)
             claim_all_available_rewards(page)
 
-            status_check = page.evaluate(r'''() => {
-                const pb = document.querySelector('[role="progressbar"][aria-label*="Visual Search" i], [role="progressbar"][aria-label*="trực quan" i]');
-                if (pb) {
-                    const cur = parseFloat(pb.getAttribute('aria-valuenow') || '0');
-                    const max = parseFloat(pb.getAttribute('aria-valuemax') || '1');
-                    const valText = (pb.getAttribute('aria-valuetext') || '').trim();
-                    const done = (max > 0 && cur >= max) || valText === '100%';
-                    return { cur, max, valText, done };
-                }
-                const textContent = document.body.innerText;
-                const m = textContent.match(/(?:Visual Search Streak|Visual Search|Tìm kiếm trực quan)[^\d]*(\d+)\s*\/\s*(\d+)/i);
-                if (m) {
-                    const c = parseInt(m[1]), mx = parseInt(m[2]);
-                    return { cur: c, max: mx, valText: `${c}/${mx}`, done: c >= mx && mx > 0 };
-                }
-                return null;
-            }''')
+            status_check = read_visual_search_streak_status(page)
 
             if status_check and status_check.get("done"):
                 logger.info(f"   [✓] Visual Search đã nổ điểm thành công: {status_check.get('cur')}/{status_check.get('max')} [✓]!")
@@ -1859,6 +1968,13 @@ def handle_visual_search_streak(page: Page) -> bool:
 
         # Nếu sau 3 lần thử vẫn không được
         visual_failed = True
+        logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
+        logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
+        return False
+
+    except Exception as e:
+        visual_failed = True
+        logger.warning(f"   [!] Lỗi trong quá trình xử lý Visual Search: {e}")
         logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
         logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
         return False
@@ -1979,11 +2095,34 @@ def get_daily_search_progress(page: Page) -> dict:
                     result.activities['Mobile App'] = { cur: c, max: m, done: c >= m && m > 0 };
                     result.found_count++;
                 }
-                const visM = textContent.match(/(?:Visual Search Streak|Visual Search|Tìm kiếm trực quan)[^\d]*(\d+)\s*\/\s*(\d+)/i);
-                if (visM && !result.activities['Visual Search'].done) {
-                    const c = parseInt(visM[1]), m = parseInt(visM[2]);
-                    result.activities['Visual Search'] = { cur: c, max: m, done: c >= m && m > 0 };
-                    result.found_count++;
+                if (!result.activities['Visual Search'].done) {
+                    let visM = null;
+                    const allDivs = document.querySelectorAll('div');
+                    for (const d of allDivs) {
+                        const txt = (d.innerText || '').trim();
+                        if ((txt.startsWith('Visual Search Streak') || txt.startsWith('Tìm kiếm trực quan')) && txt.length < 350) {
+                            const matches = Array.from(txt.matchAll(/(\d+)\s*\/\s*(\d+)/g));
+                            if (matches.length > 0) {
+                                visM = matches[matches.length - 1];
+                                break;
+                            }
+                        }
+                    }
+                    if (!visM) {
+                        const idx = textContent.indexOf('Visual Search');
+                        if (idx !== -1) {
+                            const sub = textContent.slice(idx, idx + 300);
+                            const matches = Array.from(sub.matchAll(/(\d+)\s*\/\s*(\d+)/g));
+                            if (matches.length > 0) {
+                                visM = matches[matches.length - 1];
+                            }
+                        }
+                    }
+                    if (visM) {
+                        const c = parseInt(visM[1]), m = parseInt(visM[2]);
+                        result.activities['Visual Search'] = { cur: c, max: m, done: c >= m && m > 0 };
+                        result.found_count++;
+                    }
                 }
             }
             return result;
