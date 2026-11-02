@@ -1810,38 +1810,41 @@ def read_visual_search_streak_status(page: Page) -> dict:
 
 def handle_visual_search_streak(page: Page) -> bool:
     """
-    Thực hiện Visual Search Streak:
-    1. Quét lấy 1 ảnh ngẫu nhiên từ thư mục screenshot (hoặc fallback chụp màn hình hiện tại).
-    2. Truy cập thẳng trang: https://www.bing.com/visualsearch thay vì click camera.
-    3. Định vị input[type='file'] và nạp ảnh thực tế vào.
-    4. Chờ URL chuyển sang iss=sbi hoặc xuất hiện selector .visual-search-results (timeout 8-10 giây).
-    5. Cuộn nhẹ trang kết quả và click vào một mục kết quả tương tự để hoàn tất chu trình kích hoạt beacon.
-    6. Quay lại Dashboard kiểm tra lại: Nếu thẻ Visual Search vẫn 0/1 [✗], thử lại tối đa 2 lần nữa (tổng 3 lần).
-       Nếu vẫn không được, ghi log cảnh báo [WARNING] Visual Search chưa nổ điểm sau 3 lần thử và cắm cờ visual_failed = True.
+    Thực hiện Visual Search Streak - Quy trình 1-shot deterministic:
+    Bước 1: Chuẩn bị ảnh upload nhẹ & hợp lệ (resize 800x600, JPEG 85% ~40-90KB)
+    Bước 2: Kích hoạt từ thẻ Visual Search trên Dashboard (/earn) -> click "Search now"
+    Bước 3: Mở hộp thoại Camera (#sb_sbidialog) và Upload ảnh (expect_file_chooser + set_input_files)
+    Bước 4: Xác nhận URL kết quả THẬT (view=detailv2 & iss=sbi|sbiupload|VSI), fallback click ảnh mẫu
+    Bước 5: Giữ trang nhận Beacon & Kiểm tra lại trên Dashboard
     """
-    logger.info("--- BẮT ĐẦU: VISUAL SEARCH STREAK (TRUY CẬP TRỰC TIẾP & UPLOAD ẢNH) ---")
-    visual_failed = False
+    import tempfile
+    from PIL import Image
+    from pathlib import Path
+
+    logger.info("--- BẮT ĐẦU: VISUAL SEARCH STREAK (1-SHOT DETERMINISTIC FLOW) ---")
     max_attempts = 3
 
     try:
-        from core.activities import dismiss_popups, claim_all_available_rewards, tap_corner_rewards_coin
+        from core.activities import dismiss_popups, claim_all_available_rewards, tap_corner_rewards_coin, get_random_screenshot_path
 
         for attempt in range(1, max_attempts + 1):
             logger.info(f"[*] Visual Search - Lần thử {attempt}/{max_attempts}...")
-            # Luôn kiểm tra chính xác tại trang https://rewards.bing.com/earn
+
+            # Luôn kiểm tra tại trang /earn
             if "rewards.bing.com/earn" not in page.url:
                 page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_timeout(2000)
             dismiss_popups(page)
 
             status_initial = read_visual_search_streak_status(page)
-
             if status_initial and status_initial.get("done"):
                 logger.info(f"   [✓] Thẻ Visual Search đã hoàn thành ({status_initial.get('cur')}/{status_initial.get('max')})! Bỏ qua.")
                 logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
                 return True
 
-            # Lấy ảnh ngẫu nhiên từ thư mục screenshot hoặc fallback an toàn
+            # ============================================================
+            # BƯỚC 1: Chuẩn bị ảnh upload nhẹ & hợp lệ
+            # ============================================================
             img_path = get_random_screenshot_path()
             if not img_path or not img_path.exists():
                 fallback_path = Path("./data/temp_viewport_capture.png").resolve()
@@ -1850,102 +1853,334 @@ def handle_visual_search_streak(page: Page) -> bool:
                 img_path = fallback_path
                 logger.info(f"   [Visual Search] Sử dụng fallback chụp viewport: '{img_path.name}'")
 
-            # Truy cập thẳng trang: https://www.bing.com/visualsearch thay vì click camera
-            logger.info("   [*] Truy cập thẳng: https://www.bing.com/visualsearch ...")
+            # Resize ảnh về max 800x600, lưu JPEG 85% để Bing xử lý <1s
+            upload_img_path = Path("./data/temp_vs_upload.jpg").resolve()
+            upload_img_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                page.goto("https://www.bing.com/visualsearch", wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(2000)
-                dismiss_popups(page)
+                with Image.open(img_path) as im:
+                    im.thumbnail((800, 600), Image.LANCZOS)
+                    if im.mode in ("RGBA", "P"):
+                        im = im.convert("RGB")
+                    im.save(upload_img_path, "JPEG", quality=85, optimize=True)
+                size_kb = round(upload_img_path.stat().st_size / 1024, 1)
+                logger.info(f"   [*] Ảnh upload đã resize: {upload_img_path.name} ({size_kb} KB)")
             except Exception as e:
-                logger.warning(f"   [!] Lỗi khi tải https://www.bing.com/visualsearch: {e}")
+                logger.warning(f"   [!] Resize ảnh thất bại, dùng ảnh gốc: {e}")
+                upload_img_path = img_path
 
-            # Tìm thẻ input: page.locator("input[type='file']").first
-            input_file = page.locator("input[type='file']").first
+            # ============================================================
+            # BƯỚC 2: Kích hoạt từ thẻ Visual Search trên Dashboard (/earn)
+            # ============================================================
+            logger.info("   [*] Quét thẻ Visual Search Streak trên /earn...")
+            
+            # Always create a new page for Bing visual search to avoid login redirect issues
+            target_page = page.context.new_page()
+            
             try:
-                input_file.wait_for(state="attached", timeout=5000)
-            except Exception:
-                pass
+                # Tìm thẻ Visual Search Streak (data-rac hoặc text)
+                vs_card = page.locator(
+                    'a[href*="/earn/quest/"]:has-text("Visual Search"), '
+                    'a[href*="visualsearch"], '
+                    'a[href*="visual-search"], '
+                    '[data-rac]:has-text("Visual Search Streak"), '
+                    'div:has-text("Visual Search Streak") a, '
+                    'div:has-text("Visual Search") a[href*="bing.com"]'
+                ).first
+                if vs_card.count() > 0 and vs_card.is_visible(timeout=3000):
+                    logger.info("   [*] Tìm thấy thẻ Visual Search Streak, click để mở popup nhiệm vụ...")
+                    vs_card.click(force=True, timeout=3000)
+                    page.wait_for_timeout(1500)
+                    dismiss_popups(page)
 
-            if input_file.count() > 0:
-                logger.info(f"   [*] Nạp file ảnh {img_path} vào input[type='file']...")
-                input_file.set_input_files(str(img_path))
-            else:
-                logger.warning("   [!] Không tìm thấy thẻ input[type='file'] trên bing.com/visualsearch.")
-                upload_btn = page.locator('#sb_fileinput, #sb_upload, .sbi_upload, span:has-text("tải lên"), span:has-text("upload"), input[type="file"]').first
-                if upload_btn.count() > 0:
-                    try:
-                        upload_btn.set_input_files(str(img_path))
-                    except Exception:
-                        pass
-
-            # Giữ trang chờ phân tích: Chờ URL chuyển sang SBIVSP, iss=sbi, images hoặc xuất hiện selector .visual-search-results (timeout 8–10 giây)
-            logger.info("   [*] Đợi kết quả phân tích ảnh xuất hiện (iss=sbi hoặc .visual-search-results)...")
-            try:
-                page.wait_for_url(lambda u: "visualsearch" not in u and ("SBIVSP" in u or "iss=" in u or "images" in u or "search" in u), timeout=10000)
-            except Exception:
-                pass
-
-            try:
-                page.locator(".visual-search-results, [class*='visual-search'], .imgpt, a.iusc, #b_content, #b_results, #vs_content").first.wait_for(state="visible", timeout=8000)
-            except Exception:
-                pass
-
-            # Giữ trang để máy chủ Bing phân tích
-            dwell_ms = random.randint(4000, 6000)
-            logger.info(f"   [*] Duy trì trang phân tích ảnh {dwell_ms/1000:.1f}s...")
-            page.wait_for_timeout(dwell_ms)
-
-            # Cuộn nhẹ trang kết quả
-            logger.info("   [*] Cuộn nhẹ trang kết quả...")
-            page.mouse.wheel(0, random.randint(300, 600))
-            page.wait_for_timeout(random.randint(1500, 2500))
-
-            # Click vào một mục kết quả tương tự để hoàn tất chu trình kích hoạt beacon
-            try:
-                similar_selectors = [
-                    ".imgpt a",
-                    "a.iusc",
-                    "#b_results a",
-                    ".visual-search-results a",
-                    "[class*='visual-search'] a",
-                    ".vs_items a",
-                    ".vsl_card",
-                    ".insights-card a",
-                    "#vs_results a"
-                ]
-                clicked_item = False
-                for sel in similar_selectors:
-                    items = page.locator(sel)
-                    count = items.count()
-                    if count > 0:
-                        for idx in range(min(count, 4)):
-                            target = items.nth(idx)
+                    # Tìm nút "Search now" / "Tìm kiếm ngay" trong dialog/popup
+                    search_now_selectors = [
+                        'a[href*="bing.com/visualsearch"]',
+                        'a[href*="visualsearch"]:has-text("Search now")',
+                        'a[href*="visualsearch"]:has-text("Tìm kiếm ngay")',
+                        'button:has-text("Search now")',
+                        'button:has-text("Tìm kiếm ngay")',
+                        '[role="button"]:has-text("Search now")',
+                        'a:has-text("Search now")',
+                        'a:has-text("Tìm kiếm ngay")',
+                    ]
+                    search_now_clicked = False
+                    for sel in search_now_selectors:
+                        btn = page.locator(sel).first
+                        if btn.count() > 0 and btn.is_visible(timeout=1500):
+                            logger.info(f"   [*] Click nút '{sel}' để mở Visual Search...")
+                            # Bắt tab mới nếu có
                             try:
-                                target.scroll_into_view_if_needed(timeout=2000)
-                                logger.info(f"   [*] Click vào một mục kết quả tương tự ({sel})...")
-                                target.hover()
-                                page.wait_for_timeout(300)
-                                target.click(force=True, timeout=3000)
-                                clicked_item = True
-                                break
+                                with page.context.expect_page(timeout=5000) as new_tab_info:
+                                    btn.click(force=True, timeout=3000)
+                                target_page = new_tab_info.value
+                                target_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                                logger.info("   [*] Đã chuyển sang tab mới từ nút Search now")
+                                search_now_clicked = True
                             except Exception:
-                                continue
-                    if clicked_item:
-                        break
-                if clicked_item:
-                    page.wait_for_timeout(random.randint(2500, 4000))
-                else:
-                    logger.debug("   [Visual Search] Không tìm thấy thẻ kết quả tương tự để click trực tiếp.")
-            except Exception as e:
-                logger.debug(f"   [Visual Search] Bỏ qua lỗi click kết quả tương tự: {e}")
+                                # Click trong cùng tab
+                                btn.click(force=True, timeout=3000)
+                                page.wait_for_load_state("domcontentloaded", timeout=15000)
+                                target_page = page
+                                search_now_clicked = True
+                            break
 
-            # Chạm nhẹ đồng xu góc nếu có
+                    if not search_now_clicked:
+                        logger.warning("   [!] Không tìm thấy nút Search now, điều hướng thủ công...")
+                else:
+                    logger.info("   [*] Không tìm thấy thẻ Visual Search trên /earn, điều hướng thẳng Bing...")
+            except Exception as e:
+                logger.warning(f"   [!] Lỗi khi xử lý thẻ Visual Search trên /earn: {e}")
+
+            # Điều hướng tới trang chủ Bing để mở Camera (on target_page)
+            if "bing.com" not in target_page.url or target_page.is_closed():
+                logger.info("   [*] Điều hướng tới https://www.bing.com/?FORM=ML2PCR ...")
+                if target_page.is_closed():
+                    target_page = page.context.new_page()
+                target_page.goto("https://www.bing.com/?FORM=ML2PCR", wait_until="domcontentloaded", timeout=15000)
+                target_page.wait_for_timeout(2000)
+                dismiss_popups(target_page)
+
+            # ============================================================
+            # BƯỚC 3: Mở hộp thoại Camera (#sb_sbidialog) và Upload ảnh
+            # ============================================================
+            logger.info("   [*] Mở hộp thoại Camera trên Bing...")
+            
+            # 3.1 Click nút Camera để nạp sbi.js và mở #sb_sbidialog
+            camera_selectors = [
+                '#sb_sbip',          # Nút camera variant (visible)
+                '#sb_sbi',           # Nút camera chính PC (may be hidden)
+                '#sb_camera',        # Camera icon
+                '[aria-label*="Search using an image" i]',  # Visible
+                '[aria-label*="Visual Search" i]',
+                '[aria-label*="Tìm kiếm bằng hình ảnh" i]',
+                '.sbi_b',            # Class camera button
+                'button[aria-label*="camera" i]',
+            ]
+            camera_opened = False
+            for cam_sel in camera_selectors:
+                cam_btn = target_page.locator(cam_sel).first
+                if cam_btn.count() > 0 and cam_btn.is_visible(timeout=2000):
+                    logger.info(f"   [*] Click nút Camera: {cam_sel}")
+                    # Use JavaScript click for reliability
+                    try:
+                        target_page.evaluate(f'document.querySelector("{cam_sel}").click()')
+                    except Exception:
+                        cam_btn.click(force=True, timeout=3000)
+                    target_page.wait_for_timeout(3000)  # Đợi sbi.js load và dialog xuất hiện
+                    camera_opened = True
+                    break
+
+            if not camera_opened:
+                logger.warning("   [!] Không tìm thấy nút Camera, điều hướng về trang chủ Bing để thử lại...")
+                target_page.goto("https://www.bing.com/?FORM=ML2PCR", wait_until="domcontentloaded", timeout=15000)
+                target_page.wait_for_timeout(3000)
+                # Try camera button again after reload
+                for cam_sel in camera_selectors:
+                    cam_btn = target_page.locator(cam_sel).first
+                    if cam_btn.count() > 0 and cam_btn.is_visible(timeout=2000):
+                        logger.info(f"   [*] Click nút Camera (retry): {cam_sel}")
+                        try:
+                            target_page.evaluate(f'document.querySelector("{cam_sel}").click()')
+                        except Exception:
+                            cam_btn.click(force=True, timeout=3000)
+                        target_page.wait_for_timeout(3000)
+                        camera_opened = True
+                        break
+
+            # 3.2 Đợi hộp thoại Camera xuất hiện (actual dialog is #sb_sbipane)
+            dialog_selectors = [
+                '#sb_sbipane',     # Actual dialog ID found in testing
+                '#sb_sbidialog',   # Dialog chính (legacy)
+                '.sbidialog',      # Class dialog
+                '#sb_pastepn',     # Paste panel
+                '[role="dialog"][aria-label*="Visual" i]',
+                'div.sbi_dialog',
+            ]
+            dialog_found = False
+            for dlg_sel in dialog_selectors:
+                dlg = target_page.locator(dlg_sel).first
+                if dlg.count() > 0 and dlg.is_visible(timeout=3000):
+                    logger.info(f"   [*] Hộp thoại Camera đã mở: {dlg_sel}")
+                    dialog_found = True
+                    break
+
+            if not dialog_found:
+                logger.warning("   [!] Hộp thoại Camera chưa xuất hiện, thử tải lại visualsearch...")
+                target_page.goto("https://www.bing.com/visualsearch", wait_until="domcontentloaded", timeout=15000)
+                target_page.wait_for_timeout(2000)
+                # Thử tìm lại dialog
+                for dlg_sel in dialog_selectors:
+                    dlg = target_page.locator(dlg_sel).first
+                    if dlg.count() > 0 and dlg.is_visible(timeout=3000):
+                        dialog_found = True
+                        break
+
+            # 3.3 Upload ảnh: Ưu tiên expect_file_chooser (Native), fallback set_input_files trực tiếp
+            upload_success = False
+            
+            # Cách 1: Native File Chooser qua nút Browse trong dialog
+            browse_selectors = [
+                '#sb_brtext',              # Text "Browse"
+                '.sbi_file_upload',        # Class upload
+                'label[for="sb_fileinput"]', # Label for file input
+                'a:has-text("Browse")',    # Link Browse
+                'span:has-text("Browse")', # Span Browse
+                'button:has-text("Browse")',
+                'a:has-text("Duyệt")',     # Vietnamese
+                'span:has-text("Duyệt")',
+            ]
+            
+            for browse_sel in browse_selectors:
+                browse_btn = target_page.locator(browse_sel).first
+                if browse_btn.count() > 0 and browse_btn.is_visible(timeout=1500):
+                    logger.info(f"   [*] Click nút Browse ({browse_sel}) và dùng expect_file_chooser...")
+                    try:
+                        with target_page.expect_file_chooser(timeout=5000) as fc_info:
+                            # Use JavaScript click for elements that are not "visible" to Playwright
+                            target_page.evaluate(f'document.querySelector("{browse_sel}").click()')
+                        file_chooser = fc_info.value
+                        file_chooser.set_files(str(upload_img_path))
+                        upload_success = True
+                        logger.info("   [✓] Upload ảnh thành công qua File Chooser!")
+                        break
+                    except Exception as e:
+                        logger.debug(f"   [!] expect_file_chooser thất bại với {browse_sel}: {e}")
+                        continue
+
+            # Cách 2: Fallback - set_input_files trực tiếp vào #sb_fileinput
+            if not upload_success:
+                logger.info("   [*] Thử upload trực tiếp qua input#sb_fileinput...")
+                file_inputs = [
+                    'input#sb_fileinput',
+                    'input.sbi_file',
+                    'input[type="file"][accept*="image"]',
+                    'input[type="file"]',
+                ]
+                for inp_sel in file_inputs:
+                    file_inp = target_page.locator(inp_sel).first
+                    if file_inp.count() > 0:
+                        try:
+                            file_inp.set_input_files(str(upload_img_path))
+                            file_inp.dispatch_event("change")
+                            target_page.wait_for_timeout(1000)
+                            upload_success = True
+                            logger.info(f"   [✓] Upload ảnh thành công qua {inp_sel}!")
+                            break
+                        except Exception as e:
+                            logger.debug(f"   [!] set_input_files thất bại với {inp_sel}: {e}")
+                            continue
+
+            if not upload_success:
+                logger.warning("   [!] Tất cả cách upload đều thất bại!")
+                if attempt < max_attempts:
+                    logger.info("   [*] Nghỉ 3 giây trước khi thử lại...")
+                    target_page.wait_for_timeout(3000)
+                    continue
+                logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
+                logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
+                return False
+
+            # ============================================================
+            # BƯỚC 4: Xác nhận URL kết quả THẬT (view=detailv2 & FORM=VSMAGC|VSI|...)
+            # ============================================================
+            logger.info("   [*] Đợi URL kết quả phân tích (view=detailv2 & FORM=VSMAGC/visualsearch)...")
+            result_url_confirmed = False
+            
+            def is_valid_result_url(url: str) -> bool:
+                url_lower = url.lower()
+                # Valid visual search result URLs have view=detailv2 (or detailV2) and a visual search FORM code
+                has_detailv2 = "view=detailv2" in url_lower
+                has_visual_form = any(f in url_lower for f in [
+                    "form=vs", "form=vsi", "form=vsmagc", "form=sbiupload", 
+                    "form=imvnxt", "form=imv", "form=irpfed", "form=irpvnext",  # Visual search next/result pages
+                    "iss=sbi", "iss=sbiupload", "iss=vsi"
+                ])
+                return has_detailv2 and has_visual_form
+
+            # Chờ tối đa 15 giây
+            import time as time_module
+            wait_start = time_module.time()
+            while time_module.time() - wait_start < 15:
+                current_url = target_page.url
+                if is_valid_result_url(current_url):
+                    logger.info(f"   [✓] Đã vào trang kết quả THẬT: {current_url}")
+                    result_url_confirmed = True
+                    break
+                target_page.wait_for_timeout(500)
+
+            # Fallback: nếu sau 10s vẫn chưa sang view=detailv2, click ảnh mẫu trong popup Camera
+            if not result_url_confirmed and time_module.time() - wait_start > 10:
+                logger.warning("   [!] Timeout 10s chưa có view=detailv2, thử click ảnh kết quả đầu tiên...")
+                # Click first image result link (a:has(img) with view=detailv2 in href)
+                result_links = target_page.locator('a:has(img)[href*="view=detailv2"], a:has(img)[href*="view=detailV2"]').all()
+                for i, link in enumerate(result_links[:5]):
+                    try:
+                        logger.info(f"   [*] Click kết quả hình ảnh {i}...")
+                        link.scroll_into_view_if_needed(timeout=2000)
+                        link.click(force=True, timeout=3000)
+                        target_page.wait_for_timeout(3000)
+                        if is_valid_result_url(target_page.url):
+                            logger.info(f"   [✓] Fallback thành công: {target_page.url}")
+                            result_url_confirmed = True
+                            break
+                    except Exception as e:
+                        logger.debug(f"   [!] Click kết quả {i} thất bại: {e}")
+                        continue
+                
+                # Đợi thêm 5s
+                extra_wait_start = time_module.time()
+                while not result_url_confirmed and time_module.time() - extra_wait_start < 5:
+                    current_url = target_page.url
+                    if is_valid_result_url(current_url):
+                        logger.info(f"   [✓] Fallback thành công, URL kết quả: {current_url}")
+                        result_url_confirmed = True
+                        break
+                    target_page.wait_for_timeout(500)
+
+            if not result_url_confirmed:
+                logger.warning(f"   [!] Không xác nhận được URL kết quả hợp lệ. URL hiện tại: {target_page.url}")
+                if attempt < max_attempts:
+                    logger.info("   [*] Nghỉ 3 giây trước khi thử lại...")
+                    target_page.wait_for_timeout(3000)
+                    continue
+                logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
+                logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
+                return False
+
+            # ============================================================
+            # BƯỚC 5: Giữ trang nhận Beacon & Kiểm tra lại trên Dashboard
+            # ============================================================
+            logger.info("   [*] Đã vào trang kết quả view=detailv2, chờ 6-8s nhận Beacon...")
+            target_page.wait_for_timeout(random.randint(6000, 8000))
+
+            # Click nhẹ vào 1 tab/ảnh trong khung kết quả chi tiết
+            result_click_selectors = [
+                '#detailCanvas',
+                '.insightsOverlay',
+                '.imgpt a',
+                '.vsl_card a',
+                '.vs_items a',
+                '[class*="detail"] a',
+            ]
+            for rc_sel in result_click_selectors:
+                rc_elem = target_page.locator(rc_sel).first
+                if rc_elem.count() > 0 and rc_elem.is_visible(timeout=1500):
+                    try:
+                        rc_elem.scroll_into_view_if_needed(timeout=1500)
+                        rc_elem.click(force=True, timeout=2000)
+                        logger.info(f"   [*] Đã click vào kết quả chi tiết ({rc_sel})")
+                        target_page.wait_for_timeout(1500)
+                        break
+                    except Exception:
+                        continue
+
+            # Chạm đồng xu góc Rewards
             try:
-                tap_corner_rewards_coin(page, context_name="VisualSearch")
+                tap_corner_rewards_coin(target_page, context_name="VisualSearch-Result")
             except Exception:
                 pass
 
-            # Quay lại Dashboard kiểm tra lại
+            # Quay về Dashboard kiểm tra điểm
             logger.info("   [*] Quay lại Dashboard kiểm tra điểm Visual Search...")
             page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
             page.wait_for_timeout(3000)
@@ -1967,21 +2202,14 @@ def handle_visual_search_streak(page: Page) -> bool:
                     page.wait_for_timeout(3000)
 
         # Nếu sau 3 lần thử vẫn không được
-        visual_failed = True
         logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
         logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
         return False
 
     except Exception as e:
-        visual_failed = True
         logger.warning(f"   [!] Lỗi trong quá trình xử lý Visual Search: {e}")
-        logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
-        logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
-        return False
-
-    except Exception as e:
-        visual_failed = True
-        logger.warning(f"   [!] Lỗi trong quá trình xử lý Visual Search: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
         logger.warning("[WARNING] Visual Search chưa nổ điểm sau 3 lần thử")
         logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
         return False
