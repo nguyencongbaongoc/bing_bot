@@ -15,6 +15,11 @@ from playwright.sync_api import Page, BrowserContext
 from core.humanizer import human_delay
 from core.tracker import _log_info, _log_debug, _log_warning, _log_error, _log_exception, logger
 from core.ai_solver import ask_local_ai, solve_quiz_with_ai, unload_model_from_vram
+from core.searcher import (
+    human_type_and_search,
+    execute_single_search,
+    perform_related_cluster_search,
+)
 
 # Use PYTHONUTF8=1 environment variable instead of manual wrapping
 # This avoids issues with stream wrapping in subprocesses
@@ -59,15 +64,28 @@ def claim_all_available_rewards(page: Page) -> int:
     """
     Tự động tìm và bấm nhận tất cả đồng xu / phần thưởng đang chờ Claim.
     Xử lý chuẩn xác cả nút ngoài Dashboard lẫn popup modal z-40 ('Claim points').
+    Đặc biệt luôn cuộn container dialog xuống đáy (scrollTop = scrollHeight)
+    để lộ và nhận trọn vẹn nút Claim của Bing Star bonus vào đầu tháng.
     """
     claimed_count = 0
     try:
-        # Bước 1: Nếu đang có popup modal nổi (z-40 / role="dialog"), ưu tiên bấm nút bên trong trước
+        # Bước 1: Nếu đang có popup modal nổi (z-40 / role="dialog"), cuộn xuống đáy trước khi quét nút Claim
+        try:
+            page.evaluate("""() => {
+                const dialogs = document.querySelectorAll('[role="dialog"], .overflow-auto, .scrollbar-panel, div.fixed.inset-0');
+                dialogs.forEach(d => { d.scrollTop = d.scrollHeight; });
+            }""")
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
+
         modal_selectors = [
             'div.fixed.inset-0 button:has-text("Claim points")',
             '[role="dialog"] button:has-text("Claim points")',
             'button:has-text("Claim points")',
             'span:text-is("Claim points")',
+            '[role="dialog"] button:has-text("Claim")',
+            'button:has-text("Claim")',
         ]
         for sel in modal_selectors:
             loc = page.locator(sel).first
@@ -77,8 +95,13 @@ def claim_all_available_rewards(page: Page) -> int:
                 logger.info(f"[Coin] Đã bấm nhận xu trong popup với selector: {sel}")
                 page.wait_for_timeout(1500)
 
-        # Bước 2: Tìm các nút "Ready to claim" trên mặt trang Dashboard
-        ready_buttons = page.locator('button:has-text("Ready to claim"), a:has-text("Ready to claim")')
+        # Bước 2: Tìm các nút "Ready to claim" hoặc thẻ "Bing Star bonus" trên mặt trang Dashboard
+        ready_buttons = page.locator(
+            'button:has-text("Ready to claim"), a:has-text("Ready to claim"), '
+            '[aria-label*="Ready to claim" i], [aria-label*="Star bonus" i] button, '
+            'div:has-text("Bing Star bonus") button:has-text("Claim"), '
+            'div:has-text("Star bonus") button:has-text("Claim")'
+        )
         count = min(ready_buttons.count(), 10)
         for i in range(count):
             try:
@@ -86,12 +109,26 @@ def claim_all_available_rewards(page: Page) -> int:
                 if btn.is_visible(timeout=1000):
                     btn.scroll_into_view_if_needed(timeout=2000)
                     btn.click(timeout=3000)
-                    logger.info("[Coin] Đã chạm thẻ 'Ready to claim', đang kiểm tra popup nhận xu...")
+                    logger.info("[Coin] Đã chạm thẻ 'Ready to claim' / 'Bing Star bonus', đang kiểm tra popup nhận xu...")
                     page.wait_for_timeout(1500)
                     claimed_count += 1
 
-                    # Ngay sau khi bấm "Ready to claim", nếu popup "Claim points" hiện ra thì bấm xác nhận ngay
-                    confirm_btn = page.locator('button:has-text("Claim points"), [role="dialog"] button:has-text("Claim")').first
+                    # Cuộn xuống đáy popup để lộ nút Claim của Bing Star bonus
+                    try:
+                        page.evaluate("""() => {
+                            const dialogs = document.querySelectorAll('[role="dialog"], .overflow-auto, .scrollbar-panel, div.fixed.inset-0');
+                            dialogs.forEach(d => { d.scrollTop = d.scrollHeight; });
+                        }""")
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+
+                    # Ngay sau khi bấm thẻ, nếu popup "Claim points" hiện ra thì bấm xác nhận ngay
+                    confirm_btn = page.locator(
+                        'button:has-text("Claim points"), [role="dialog"] button:has-text("Claim"), '
+                        '[role="dialog"] button:has-text("Claim points"), button:has-text("Claim"), '
+                        'div.fixed.inset-0 button:has-text("Claim")'
+                    ).first
                     if confirm_btn.count() > 0 and confirm_btn.is_visible(timeout=2000):
                         confirm_btn.click(force=True, timeout=3000)
                         logger.info("[Coin] -> Đã xác nhận 'Claim points' trong popup thành công!")
@@ -309,56 +346,104 @@ def solve_checkin(page: Page) -> bool:
 
 def solve_interactive_tab(page: Page, timeout_sec: int = 5):
     """
-    Xử lý tab con của Daily Set: Chỉ giải nếu thực sự có câu hỏi Quiz/Poll.
-    Nếu là trang tìm kiếm thông thường (UrlOffer), lướt nhẹ và thoát ngay trong 4 giây.
+    Xử lý tab con của Daily Set / Dashboard Activities:
+    - Nếu có câu hỏi trắc nghiệm/Quiz (.btOption, #QuestionPane, input[type="radio"], .rqOption):
+      Click ngẫu nhiên 1 đáp án để hoàn thành câu đố, đợi 3-5 giây rồi đóng tab.
+    - Nếu là trang tìm kiếm thông thường: Cuộn nhẹ trang, duy trì 4-6 giây rồi đóng tab.
     """
     from core.tracker import logger
     try:
         page.wait_for_load_state("domcontentloaded", timeout=5000)
     except Exception:
         pass
+    page.wait_for_timeout(1000)
 
-    # Cuộn nhẹ trang để kích hoạt beacon
+    # 1. Kiểm tra nút bắt đầu Quiz nếu có
     try:
-        page.mouse.wheel(0, 300)
-        page.wait_for_timeout(1000)
+        start_btn = page.locator('#rqStartQuiz, input[value*="Start" i], button:has-text("Start playing"), button:has-text("Start quiz"), a:has-text("Start"), input[value*="Play" i]').first
+        if start_btn.is_visible(timeout=1000):
+            logger.info("   [*] Phát hiện nút bắt đầu Quiz, đang click...")
+            start_btn.click(force=True, timeout=2000)
+            page.wait_for_timeout(1500)
     except Exception:
         pass
 
-    # Kiểm tra xem có phần tử câu hỏi trắc nghiệm thật sự hay không (timeout ngắn 2s)
+    # 2. Kiểm tra xem có phần tử câu hỏi trắc nghiệm / Quiz hay không
     quiz_selectors = [
+        ".btOption",
+        "#QuestionPane",
+        "input[type='radio']",
+        ".rqOption",
         ".wk_question",
         "#QuestionText",
         ".b_focusTextExtra",
-        "[class*='quizQuestion']"
+        "[class*='quizQuestion']",
+        ".bt_corOps",
+        "#rqQuestion",
     ]
     is_real_quiz = False
-    try:
-        if page.locator(", ".join(quiz_selectors)).first.is_visible(timeout=1500):
-            is_real_quiz = True
-    except Exception:
-        pass
+    for sel in quiz_selectors:
+        try:
+            if page.locator(sel).first.is_visible(timeout=800):
+                is_real_quiz = True
+                break
+        except Exception:
+            continue
 
-    if not is_real_quiz:
-        for sel in quiz_selectors:
+    if is_real_quiz:
+        logger.info("   [*] Phát hiện câu hỏi trắc nghiệm/Quiz...")
+        # Tìm các options trắc nghiệm (.btOption, #QuestionPane, input[type="radio"], .rqOption, ...)
+        opt_selectors = [
+            ".btOption",
+            "#QuestionPane input",
+            "#QuestionPane label",
+            "input[type='radio']",
+            ".rqOption",
+            ".wk_ans_choice",
+            "[class*='quizQuestion'] [role='button']",
+            "div[role='radio']",
+            "input[type='button']",
+        ]
+        options = []
+        for opt_sel in opt_selectors:
             try:
-                if page.locator(sel).first.is_visible(timeout=500):
-                    is_real_quiz = True
+                for el in page.locator(opt_sel).all():
+                    if el.is_visible(timeout=300):
+                        options.append(el)
+                if options:
                     break
             except Exception:
                 continue
 
-    if is_real_quiz:
-        logger.info("   [*] Phát hiện Quiz thật sự, đang gọi AI giải...")
-        try:
-            from core.ai_solver import solve_quiz_with_ai
-            solve_quiz_with_ai(page)
-        except Exception as e:
-            logger.warning(f"   [!] Lỗi khi giải quiz: {e}")
+        if options:
+            chosen = random.choice(options)
+            try:
+                logger.info(f"   [*] Đang click ngẫu nhiên 1 trong {len(options)} đáp án Quiz...")
+                chosen.click(force=True, timeout=2000)
+            except Exception as e:
+                logger.debug(f"   [!] Lỗi khi click đáp án: {e}")
+        else:
+            # Fallback sang solve_quiz_with_ai nếu có
+            try:
+                from core.ai_solver import solve_quiz_with_ai
+                solve_quiz_with_ai(page)
+            except Exception:
+                pass
+
+        wait_sec = random.uniform(3.0, 5.0)
+        logger.info(f"   [*] Đợi {wait_sec:.1f}s để hoàn tất câu đố...")
+        time.sleep(wait_sec)
     else:
-        # Nếu chỉ là trang tìm kiếm Bing thông thường (UrlOffer)
-        logger.info("   [*] Thẻ dạng UrlOffer/Search, duy trì trang 2-3s để nhận điểm...")
-        page.wait_for_timeout(2500)
+        # Nếu là trang tìm kiếm Bing thông thường (UrlOffer)
+        logger.info("   [*] Thẻ dạng UrlOffer/Search thông thường, cuộn nhẹ trang...")
+        try:
+            scroll_amt = random.randint(250, 450)
+            page.mouse.wheel(0, scroll_amt)
+        except Exception:
+            pass
+        wait_sec = random.uniform(4.0, 6.0)
+        logger.info(f"   [*] Duy trì trang {wait_sec:.1f}s để nhận điểm...")
+        time.sleep(wait_sec)
 
 
 def ensure_streak_protection(page: Page) -> bool:
@@ -530,66 +615,132 @@ def solve_cards_in_section(context: BrowserContext, page: Page, selector: str, n
         Số thẻ đã xử lý thành công
     """
     page.goto(REWARDS_URL, wait_until="domcontentloaded")
-    page.wait_for_timeout(random.randint(3000, 4000))
+    page.wait_for_timeout(random.randint(2500, 3500))
     
     # Dismiss popups after navigation
     dismiss_popups(page)
-    
-    # Auto-claim any available rewards on the dashboard
-    claim_all_available_rewards(page)
-
     try:
-        cards = page.locator(selector).all()
-        _log_info(f"[{name}] Tìm thấy {len(cards)} thẻ nhiệm vụ.")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+    cards_locator = page.locator(selector)
+    try:
+        total_cards = cards_locator.count()
+        _log_info(f"[{name}] Tìm thấy {total_cards} thẻ nhiệm vụ.")
     except Exception:
         _log_warning(f"[{name}] Không tìm thấy thẻ nhiệm vụ với selector: {selector}")
         return 0
 
     completed_count = 0
     
-    for i, card in enumerate(cards):
+    for i in range(total_cards):
         try:
-            # Kiểm tra xem thẻ đã hoàn thành chưa (có dấu tích xanh)
+            card = cards_locator.nth(i)
+            # Kiểm tra xem thẻ đã hoàn thành chưa (có dấu tích xanh / svg checkmark)
             completed_indicators = [
+                'svg.size-2',
+                'svg[class*="text-fgCtrlOnImage"]',
                 '.mee-icon-SkypeCircleCheck',
                 '.mee-icon-CheckMark',
                 'span[class*="check"]',
                 'div[class*="completed"]',
                 '[data-bi-id*="completed"]',
+                '[aria-label*="complete" i]',
+                '[aria-label*="done" i]',
             ]
             
             is_completed = False
             for indicator in completed_indicators:
                 try:
-                    if card.locator(indicator).is_visible(timeout=500):
+                    if card.locator(indicator).first.is_visible(timeout=300):
                         is_completed = True
                         break
                 except Exception:
                     continue
-            
-            if is_completed:
-                _log_debug(f"  [{i+1}/{len(cards)}] Đã hoàn thành, bỏ qua.")
-                continue
 
             # Lấy tiêu đề thẻ để log
             try:
-                title_text = card.inner_text(timeout=1000).split("\n")[0][:50]
+                title_text = card.inner_text(timeout=1000).split("\n")[0][:50].strip()
             except Exception:
                 title_text = f"Card {i+1}"
-            
-            _log_info(f"  -> Đang xử lý [{i+1}/{len(cards)}]: {title_text}...")
 
-            # Click thẻ và bắt tab mới nếu có
+            if is_completed:
+                _log_debug(f"  [{i+1}/{total_cards}] [✓] Thẻ '{title_text}' đã hoàn thành, bỏ qua.")
+                continue
+
+            _log_info(f"  -> Đang xử lý [{i+1}/{total_cards}]: {title_text}...")
+
+            # Đảm bảo tắt mọi popup/modal cũ trước khi click thẻ
             try:
-                with context.expect_page(timeout=8000) as new_tab_info:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+
+            # Cuộn thẻ vào tầm nhìn
+            try:
+                card.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+
+            sub_tab = None
+            # Mở tab thực thi: Khi click vào thẻ, kiểm tra xem có tab mới mở ra không (context.expect_page())
+            try:
+                with context.expect_page(timeout=5000) as new_tab_info:
                     try:
-                        card.click()
+                        card.click(timeout=3000)
                     except Exception:
                         try:
-                            card.click(force=True, timeout=3000)
+                            card.click(force=True, timeout=2000)
                         except Exception:
                             card.evaluate("el => el.click()")
                 sub_tab = new_tab_info.value
+            except Exception:
+                pass
+
+            # Xử lý nếu thẻ mở Drawer/Popup thay vì tab mới:
+            if sub_tab is None:
+                modal = page.locator('[role="dialog"], [role="alertdialog"], .react-aria-Modal, div.fixed.inset-0').first
+                if modal.is_visible(timeout=1500):
+                    _log_info(f"  [*] Xuất hiện Drawer/Modal cho thẻ '{title_text}'. Đang tìm nút hành động bên trong...")
+                    action_selectors = [
+                        'button:has-text("Start")', 'a:has-text("Start")',
+                        'button:has-text("Go")', 'a:has-text("Go")',
+                        'a[href*="bing.com"]',
+                        'button:has-text("Open")', 'a:has-text("Open")',
+                        'button:has-text("Bắt đầu")', 'a:has-text("Bắt đầu")',
+                        'a[target="_blank"]',
+                    ]
+                    for act_sel in action_selectors:
+                        action_btn = modal.locator(act_sel).first
+                        if action_btn.is_visible(timeout=600):
+                            _log_info(f"  [*] Đã tìm thấy nút kích hoạt ({act_sel}), đang click...")
+                            try:
+                                with context.expect_page(timeout=6000) as m_tab_info:
+                                    action_btn.click()
+                                sub_tab = m_tab_info.value
+                                break
+                            except Exception:
+                                try:
+                                    action_btn.click(force=True, timeout=2000)
+                                except Exception:
+                                    pass
+                                break
+
+            # Fallback nếu vẫn chưa mở tab mà thẻ có thuộc tính href bing.com
+            if sub_tab is None:
+                try:
+                    href = card.get_attribute("href")
+                    if href and ("bing.com" in href or "msn.com" in href or href.startswith("http")):
+                        _log_info(f"  [*] Mở tab mới từ link href của thẻ...")
+                        sub_tab = context.new_page()
+                        sub_tab.goto(href, wait_until="domcontentloaded", timeout=12000)
+                except Exception:
+                    pass
+
+            if sub_tab is not None:
                 try:
                     solve_interactive_tab(sub_tab)
                 finally:
@@ -597,27 +748,233 @@ def solve_cards_in_section(context: BrowserContext, page: Page, selector: str, n
                         sub_tab.close()
                     except Exception:
                         pass
-                page.wait_for_timeout(1000)
                 completed_count += 1
+            else:
+                # Nếu nhiệm vụ hoàn tất inline mà không cần tab
+                time.sleep(random.uniform(2.0, 3.5))
+                completed_count += 1
+
+            # Đóng bất kỳ popup/drawer nào sau khi hoàn thành thẻ
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
             except Exception:
-                # Nếu không mở tab mới (xử lý inline), đợi một chút rồi quay lại trang chính
-                human_delay(mean=4.0, std_dev=1.0, min_val=3.0)
-                page.goto(REWARDS_URL, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
-                dismiss_popups(page)
-                claim_all_available_rewards(page)
-                completed_count += 1
+                pass
 
         except Exception as e:
             _log_error(f"    [!] Lỗi xử lý thẻ {i+1}: {e}")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
             continue
 
     return completed_count
 
 
+def activate_mobile_app_card(page: Page) -> bool:
+    """
+    Kích hoạt thẻ 'Mobile App' trên Dashboard Microsoft Rewards bằng CDP Mobile Emulation:
+    1. Kiểm tra trạng thái thẻ Mobile App hiện tại trên Desktop page. Nếu đã 1/1 [✓] thì bỏ qua.
+    2. Nếu 0/1 [✗] hoặc chưa hoàn thành:
+       - Mở một tab tạm ngay trong page.context hiện tại (không tốn thêm process trình duyệt).
+       - Dùng CDP Session ép tab này mang định danh của Bing Mobile App trên Android (BingSapphire)
+         và kích hoạt Touch / Device Metrics di động.
+       - Điều hướng tới https://rewards.bing.com/earn.
+       - Gọi claim_all_available_rewards(mob_tab) để tự động bấm các thẻ Ready to claim -> Claim points.
+       - Tìm và click vào thẻ Mobile App / Check in / Daily check-in trên mobile UI, bấm Claim points trong dialog.
+       - Đợi 3 giây cho beacon hoàn tất rồi đóng mob_tab.
+    """
+    _log_info("[Mobile App Card] Đang kiểm tra trạng thái thẻ Mobile App trên Dashboard...")
+    try:
+        mobile_card_selectors = [
+            'button:has-text("Mobile App")',
+            'div[role="button"]:has-text("Mobile App")',
+            'button:has-text("App Bing")',
+            'div[role="button"]:has-text("App Bing")',
+            'button:has-text("Bing App")',
+            'div[role="button"]:has-text("Bing App")',
+            'button:has-text("Bing App Streak")',
+            'section#streaks button:has-text("Mobile")',
+            'section#streaks div[role="button"]:has-text("Mobile")',
+            '[role="progressbar"][aria-label*="mobile" i]',
+            '[role="progressbar"][aria-label*="bing app" i]',
+            '[role="progressbar"][aria-label*="ứng dụng" i]',
+        ]
+
+        card = None
+        for sel in mobile_card_selectors:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible(timeout=500):
+                card = loc
+                break
+
+        is_done = False
+        if card:
+            card_text = card.inner_text(timeout=1000).replace("\n", " ")
+            has_check = card.locator('svg.size-2, svg[class*="text-fgCtrlOnImage"], .mee-icon-CheckMark, span[class*="check"]').count() > 0
+            val_now = card.get_attribute("aria-valuenow")
+            val_max = card.get_attribute("aria-valuemax")
+            val_text = (card.get_attribute("aria-valuetext") or "").strip()
+            is_bar_done = (val_max is not None and float(val_now or 0) >= float(val_max) > 0) or val_text == "100%"
+            is_done = has_check or "1/1" in card_text or "completed" in card_text.lower() or is_bar_done
+
+        if is_done:
+            _log_info("[Mobile App Card] [✓] Thẻ Mobile App đã được kích hoạt/hoàn thành trước đó (1/1).")
+            return True
+
+        _log_info("[Mobile App Card] Thẻ Mobile App đang là 0/1 [✗]. Bắt đầu kích hoạt qua CDP Mobile Emulation (BingSapphire)...")
+        
+        # 1. Mở một tab tạm ngay trong BrowserContext hiện tại
+        mob_tab = None
+        try:
+            mob_tab = page.context.new_page()
+
+            # 2. Dùng CDP Session ép tab này mang định danh Bing Mobile App trên Android (BingSapphire)
+            cdp = page.context.new_cdp_session(mob_tab)
+            cdp.send("Emulation.setUserAgentOverride", {
+                "userAgent": (
+                    "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 "
+                    "EdgA/130.0.0.0 BingSapphire/29.5.2110003554"
+                ),
+                "platform": "Linux armv8l",
+                "acceptLanguage": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
+            })
+            cdp.send("Emulation.setDeviceMetricsOverride", {
+                "width": 412,
+                "height": 915,
+                "deviceScaleFactor": 2.625,
+                "mobile": True
+            })
+            cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": True})
+
+            # 3. Điều hướng tới https://rewards.bing.com/earn
+            _log_info("[Mobile App Card] Đang mở https://rewards.bing.com/earn trên tab Mobile Emulation...")
+            mob_tab.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=25000)
+            mob_tab.wait_for_timeout(random.randint(3000, 4000))
+            dismiss_popups(mob_tab)
+
+            # Tự động bấm tất cả các phần thưởng đang chờ Claim (Ready to claim -> Claim points)
+            claim_all_available_rewards(mob_tab)
+
+            # Tìm và click vào thẻ Mobile App / Check in / Daily check-in trên giao diện di động
+            mob_card_selectors = [
+                'button:has-text("Mobile App")',
+                'div[role="button"]:has-text("Mobile App")',
+                'button:has-text("App Bing")',
+                'div[role="button"]:has-text("App Bing")',
+                'button:has-text("Bing App")',
+                'div[role="button"]:has-text("Bing App")',
+                'button:has-text("Bing App Streak")',
+                'div[role="button"]:has-text("Bing App Streak")',
+                'button:has-text("Check in")',
+                'button:has-text("Check-in")',
+                'button:has-text("Daily check-in")',
+                'div[role="button"]:has-text("Daily check-in")',
+                'div[role="button"]:has-text("Check in")',
+                'div[role="button"]:has-text("Check-in")',
+                'button:has-text("Điểm danh")',
+                'div[role="button"]:has-text("Điểm danh")',
+                'section#streaks button:has-text("Mobile")',
+                'section#streaks div[role="button"]:has-text("Mobile")',
+            ]
+
+            # Cuộn nhẹ để kích hoạt lazy render các thẻ streak
+            try:
+                mob_tab.evaluate("window.scrollBy(0, 400)")
+                mob_tab.wait_for_timeout(600)
+                mob_tab.evaluate("window.scrollTo(0, 0)")
+                mob_tab.wait_for_timeout(400)
+            except Exception:
+                pass
+
+            mob_card = None
+            for m_sel in mob_card_selectors:
+                m_loc = mob_tab.locator(m_sel).first
+                if m_loc.count() > 0 and m_loc.is_visible(timeout=500):
+                    mob_card = m_loc
+                    break
+
+            if mob_card:
+                m_text = mob_card.inner_text(timeout=1000).replace("\n", " ")
+                _log_info(f"[Mobile App Card] Tìm thấy thẻ trên Mobile UI ({m_text[:50]}). Đang chạm để kích hoạt...")
+                try:
+                    mob_card.scroll_into_view_if_needed(timeout=2000)
+                    mob_card.click(timeout=3000)
+                except Exception:
+                    try:
+                        mob_card.click(force=True, timeout=2000)
+                    except Exception:
+                        mob_card.evaluate("el => el.click()")
+
+                mob_tab.wait_for_timeout(2000)
+
+                # Cuộn dialog xuống đáy nếu có
+                try:
+                    mob_tab.evaluate("""() => {
+                        const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .overflow-auto, .scrollbar-panel, div.fixed.inset-0');
+                        dialogs.forEach(d => { d.scrollTop = d.scrollHeight; });
+                    }""")
+                    mob_tab.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+                # Bấm nút Claim points / Claim bên trong dialog nếu xuất hiện
+                claim_selectors = [
+                    'div.fixed.inset-0 button:has-text("Claim points")',
+                    '[role="dialog"] button:has-text("Claim points")',
+                    'button:has-text("Claim points")',
+                    'span:text-is("Claim points")',
+                    '[role="dialog"] button:has-text("Claim")',
+                    'button:has-text("Claim")',
+                    'button:has-text("Check-in now")',
+                    'a:has-text("Check-in now")',
+                    'button:has-text("Nhận điểm")',
+                    'button:has-text("Điểm danh")',
+                ]
+                for c_sel in claim_selectors:
+                    c_btn = mob_tab.locator(c_sel).first
+                    if c_btn.count() > 0 and c_btn.is_visible(timeout=1500):
+                        try:
+                            c_btn.click(force=True, timeout=2000)
+                            _log_info(f"[Mobile App Card] [✓] Đã bấm nút claim trong dialog di động: {c_sel}")
+                            mob_tab.wait_for_timeout(2000)
+                            break
+                        except Exception:
+                            pass
+
+                # Quét claim lần nữa cho các thẻ vừa mở khóa
+                claim_all_available_rewards(mob_tab)
+
+            # Đợi 3 giây cho beacon hoàn tất
+            _log_info("[Mobile App Card] Đợi 3 giây cho beacon gửi về máy chủ...")
+            mob_tab.wait_for_timeout(3000)
+            _log_info("[Mobile App Card] [✓] Hoàn thành quy trình Mobile Emulation Check-in.")
+            return True
+
+        except Exception as me:
+            _log_warning(f"[Mobile App Card] Lỗi trong quá trình CDP Mobile Emulation: {me}")
+            return False
+        finally:
+            if mob_tab:
+                try:
+                    mob_tab.close()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        _log_warning(f"[Mobile App Card] Lỗi khi kích hoạt thẻ Mobile App: {e}")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+
+
 def run_all_dashboard_activities(context: BrowserContext, page: Page) -> None:
     """
-    Chạy toàn bộ quy trình Dashboard Activities: Check-in -> Daily Set -> More Activities.
+    Chạy toàn bộ quy trình Dashboard Activities: Check-in -> Daily Set -> Mobile App -> More Activities.
     
     Args:
         context: BrowserContext để quản lý tab
@@ -645,7 +1002,10 @@ def run_all_dashboard_activities(context: BrowserContext, page: Page) -> None:
         "Daily Set"
     )
 
-    # 3. More Activities (Sự kiện và hoạt động bổ sung)
+    # 3. Kích hoạt thẻ 'Mobile App' trên Dashboard
+    activate_mobile_app_card(page)
+
+    # 4. More Activities (Sự kiện và hoạt động bổ sung)
     more_count = solve_cards_in_section(
         context, 
         page, 
@@ -655,7 +1015,7 @@ def run_all_dashboard_activities(context: BrowserContext, page: Page) -> None:
     if more_count == 0:
         _log_info("[More Activities] Không tìm thấy thẻ trên Dashboard cũ (mục 'Keep earning' tại /earn sẽ được quét riêng 1 lần duy nhất).")
     
-    # 4. Các khu vực khác có thể có (Special Offers, v.v.)
+    # 5. Các khu vực khác có thể có (Special Offers, v.v.)
     solve_cards_in_section(
         context,
         page,
@@ -2218,6 +2578,103 @@ def handle_visual_search_streak(page: Page) -> bool:
 solve_visual_search_streak = handle_visual_search_streak
 
 
+def extract_bing_star_bonus(page: Page) -> dict:
+    """
+    Trích xuất chỉ số 'Bing Star bonus' (tối đa 2,100 điểm/tháng) trên trang /earn hoặc Dashboard.
+    Hỗ trợ cả UI tiếng Anh và tiếng Việt, progressbar aria, thẻ card và popup.
+    Returns:
+        dict: {"current": int, "max": int, "text": str, "found": bool}
+    """
+    result = {"current": 0, "max": 2100, "text": "0 / 2,100", "found": False}
+    try:
+        raw_res = page.evaluate(r"""() => {
+            const res = { current: 0, max: 2100, text: "0 / 2,100", found: false };
+
+            // 1. Quét role="progressbar" (React-Aria UI mới)
+            const bars = document.querySelectorAll('[role="progressbar"]');
+            for (const bar of bars) {
+                const label = (bar.getAttribute('aria-label') || '').toLowerCase();
+                if (label.includes('star')) {
+                    const cur = parseFloat(bar.getAttribute('aria-valuenow') || '0');
+                    const mx = parseFloat(bar.getAttribute('aria-valuemax') || '2100');
+                    res.current = Math.round(cur);
+                    res.max = Math.round(mx) || 2100;
+                    res.text = `${res.current} / ${res.max.toLocaleString()}`;
+                    res.found = true;
+                    return res;
+                }
+            }
+
+            // 2. Quét các thẻ card hoặc button chứa 'star bonus' hoặc 'bing star'
+            const cards = document.querySelectorAll('div, section, article, a, button, mee-rewards-points-breakdown-card');
+            for (const card of cards) {
+                const txt = (card.innerText || '').trim();
+                if (/bing\s*star\s*bonus|star\s*bonus|bing\s*star/i.test(txt) && txt.length < 500) {
+                    const m = txt.match(/(\d[\d,]*)\s*(?:\/|of|trên)\s*(\d[\d,]*)/i);
+                    if (m) {
+                        const c = parseInt(m[1].replace(/,/g, ''), 10);
+                        const mx = parseInt(m[2].replace(/,/g, ''), 10);
+                        res.current = c;
+                        res.max = mx || 2100;
+                        res.text = `${c} / ${(mx || 2100).toLocaleString()}`;
+                        res.found = true;
+                        return res;
+                    }
+                }
+            }
+
+            // 3. Fallback quét toàn bộ document text
+            const bodyText = document.body.innerText || '';
+            const mBody = bodyText.match(/(?:Bing\s*Star\s*bonus|Star\s*bonus|Bing\s*Star)[\s\S]{0,100}?(\d[\d,]*)\s*(?:\/|of|trên)\s*(\d[\d,]*)/i);
+            if (mBody) {
+                const c = parseInt(mBody[1].replace(/,/g, ''), 10);
+                const mx = parseInt(mBody[2].replace(/,/g, ''), 10);
+                res.current = c;
+                res.max = mx || 2100;
+                res.text = `${c} / ${(mx || 2100).toLocaleString()}`;
+                res.found = true;
+                return res;
+            }
+
+            return res;
+        }""")
+
+        if raw_res and raw_res.get("found"):
+            result = raw_res
+            logger.info(f"[Bing Star Bonus] Đã trích xuất tiến độ: {result['text']} pts")
+            return result
+
+        # 4. Nếu chưa tìm thấy, click nhẹ vào thẻ Bing Star nếu có để mở drawer/dialog
+        try:
+            star_loc = page.locator('text=/Bing Star|Star bonus/i').first
+            if star_loc.count() > 0 and star_loc.is_visible(timeout=1000):
+                star_loc.click(timeout=1500)
+                page.wait_for_timeout(1000)
+                retry_res = page.evaluate(r"""() => {
+                    const bodyText = document.body.innerText || '';
+                    const mBody = bodyText.match(/(?:Bing\s*Star\s*bonus|Star\s*bonus|Bing\s*Star)[\s\S]{0,100}?(\d[\d,]*)\s*(?:\/|of|trên)\s*(\d[\d,]*)/i);
+                    if (mBody) {
+                        const c = parseInt(mBody[1].replace(/,/g, ''), 10);
+                        const mx = parseInt(mBody[2].replace(/,/g, ''), 10);
+                        return { current: c, max: mx || 2100, text: `${c} / ${(mx || 2100).toLocaleString()}`, found: true };
+                    }
+                    return null;
+                }""")
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+                if retry_res and retry_res.get("found"):
+                    result = retry_res
+                    logger.info(f"[Bing Star Bonus] Đã trích xuất tiến độ sau khi mở thẻ: {result['text']} pts")
+                    return result
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.debug(f"[Bing Star Bonus] Lỗi khi trích xuất Bing Star bonus: {e}")
+
+    return result
+
+
 def get_daily_search_progress(page: Page) -> dict:
     """
     Đọc tiến độ tìm kiếm thực tế và các thẻ nhiệm vụ từ Microsoft Rewards.
@@ -2248,8 +2705,10 @@ def get_daily_search_progress(page: Page) -> dict:
     try:
         # Bước A: Điều hướng tới https://rewards.bing.com/earn (nơi hiển thị cả Streaks và Points breakdown)
         if "rewards.bing.com/earn" not in page.url:
-            page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2000)
+            page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=20000)
+        else:
+            page.reload(wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(2500)
         dismiss_popups(page)
 
         # 1. Đọc 5 thẻ nhiệm vụ / chuỗi streak ngày (Bing Search, Daily Set, Edge Browsing, Mobile App, Visual Search)
@@ -2364,6 +2823,15 @@ def get_daily_search_progress(page: Page) -> dict:
         )
         progress["all_activities_done"] = all_five_done
 
+        primary_four_done = (
+            all_act.get('Bing Search', {}).get('done', False) and
+            all_act.get('Daily Set', {}).get('done', False) and
+            all_act.get('Edge Browsing', {}).get('done', False) and
+            all_act.get('Visual Search', {}).get('done', False)
+        )
+        progress["primary_four_done"] = primary_four_done
+        progress["mobile_app_done"] = all_act.get("Mobile App", {}).get("done", False)
+
         for act_name, act_info in progress["activities"].items():
             status_icon = "✓" if act_info["done"] else "✗"
             logger.info(f"[Dashboard] Thẻ {act_name}: {act_info['cur']}/{act_info['max']} [{status_icon}]")
@@ -2463,12 +2931,16 @@ def get_daily_search_progress(page: Page) -> dict:
         except Exception:
             pass
 
+        # Trích xuất chỉ số Bing Star bonus (tối đa 2,100 pts/tháng)
+        star_bonus = extract_bing_star_bonus(page)
+        progress["bing_star_bonus"] = star_bonus
+
         # CHỈ COI LÀ ALL_MAXED KHI VÀ CHỈ KHI DỮ LIỆU THỰC TẾ XÁC NHẬN CẢ PC VÀ MOBILE ĐÃ ĐẠT ĐỈNH
         if progress["found_pc"] and progress["found_mobile"]:
             if progress["pc_cur"] >= progress["pc_max"] and progress["mobile_cur"] >= progress["mobile_max"]:
                 progress["all_maxed"] = True
 
-        logger.info(f"[Dashboard] Dữ liệu thực tế: Desktop: {progress['pc_cur']}/{progress['pc_max']} (found={progress['found_pc']}) | Mobile: {progress['mobile_cur']}/{progress['mobile_max']} (found={progress['found_mobile']}) | all_maxed={progress['all_maxed']}")
+        logger.info(f"[Dashboard] Dữ liệu thực tế: Desktop: {progress['pc_cur']}/{progress['pc_max']} (found={progress['found_pc']}) | Mobile: {progress['mobile_cur']}/{progress['mobile_max']} (found={progress['found_mobile']}) | Bing Star: {star_bonus.get('text', '0 / 2,100')} | all_maxed={progress['all_maxed']}")
 
     except Exception as e:
         logger.warning(f"[Dashboard] Lỗi khi kiểm tra tiến độ ngày: {e}")

@@ -182,6 +182,7 @@ def get_mobile_access_token(page: Optional[Page] = None) -> Optional[str]:
 def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "vn") -> int:
     """
     Thực hiện Điểm danh 7 ngày (Daily Check-in - type 103) qua Bing Mobile App OAuth API.
+    Kiểm tra chéo số dư thực tế trước và sau khi gửi request.
     Trả về số điểm nhận thêm (nếu có).
     """
     logger.info("--- BẮT ĐẦU: DAILY CHECK-IN (BING MOBILE APP API - TYPE 103) ---")
@@ -197,6 +198,19 @@ def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "
         "X-Rewards-Country": country.lower(),
         "X-Rewards-Language": "vi",
     }
+
+    # Ghi nhận balance trước khi gửi request
+    old_balance = None
+    try:
+        me_resp = requests.get(
+            "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=BingApp",
+            headers=headers,
+            timeout=10,
+        )
+        if me_resp.status_code == 200:
+            old_balance = me_resp.json().get("response", {}).get("balance")
+    except Exception as e:
+        logger.debug(f"[App Check-in] Không thể đọc balance trước check-in: {e}")
 
     payload = {
         "amount": 1,
@@ -217,15 +231,34 @@ def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "
         )
         if resp.status_code == 200:
             data = resp.json()
-            balance = data.get("response", {}).get("balance")
-            logger.info(f"[App Check-in] Gửi tín hiệu điểm danh App Bing (type 103) thành công! Balance hiện tại: {balance}")
-            return 1
+            resp_obj = data.get("response", {}) if isinstance(data, dict) else {}
+            new_balance = resp_obj.get("balance")
+            activity_obj = resp_obj.get("activity") or {}
+            points_awarded = activity_obj.get("p", 0) if isinstance(activity_obj, dict) else 0
+
+            # Kiểm tra xem điểm có thực sự tăng không
+            pts_gained = 0
+            if old_balance is not None and new_balance is not None:
+                pts_gained = max(0, new_balance - old_balance)
+            elif points_awarded > 0:
+                pts_gained = points_awarded
+
+            if pts_gained > 0 or (old_balance is not None and new_balance is not None and new_balance > old_balance):
+                actual_gain = pts_gained if pts_gained > 0 else (new_balance - old_balance)
+                logger.info(f"[App Check-in] [✓] API type 103 cộng điểm thành công (+{actual_gain} pts)!")
+                return actual_gain
+            else:
+                logger.info("[App Check-in] [*] API type 103 trả về 200 nhưng số dư không đổi (+0 pts). Cần kích hoạt qua Mobile UI.")
+                return 0
         else:
             logger.debug(f"[App Check-in] Phản hồi HTTP {resp.status_code}: {resp.text[:150]}")
     except Exception as e:
         logger.warning(f"[App Check-in] Lỗi khi gửi request điểm danh API: {e}")
 
     return 0
+
+
+claim_daily_checkin = solve_mobile_app_daily_checkin
 
 
 def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn") -> int:

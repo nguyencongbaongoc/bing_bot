@@ -28,6 +28,7 @@ from .tracker import (
 )
 from .activities import (
     run_all_dashboard_activities,
+    activate_mobile_app_card,
     solve_mobile_checkin,
     solve_read_to_earn,
     run_read_to_earn,
@@ -51,6 +52,7 @@ from .activities import (
     dismiss_popups,
     claim_all_available_rewards,
     get_daily_search_progress,
+    extract_bing_star_bonus,
 )
 from .ai_solver import (
     ask_local_ai,
@@ -61,10 +63,12 @@ from .searcher import (
     human_type_and_search,
     human_bezier_move,
     perform_related_cluster_search,
+    execute_single_search,
 )
 from .mobile_app_api import (
     get_mobile_access_token,
     solve_mobile_app_daily_checkin,
+    claim_daily_checkin,
     solve_mobile_app_promotions,
     solve_mobile_app_read_to_earn,
 )
@@ -89,6 +93,7 @@ __all__ = [
     "update_session",
     "finish_session",
     "run_all_dashboard_activities",
+    "activate_mobile_app_card",
     "solve_mobile_checkin",
     "solve_read_to_earn",
     "run_read_to_earn",
@@ -112,14 +117,17 @@ __all__ = [
     "dismiss_popups",
     "claim_all_available_rewards",
     "get_daily_search_progress",
+    "extract_bing_star_bonus",
     "ask_local_ai",
     "solve_quiz_with_ai",
     "unload_model_from_vram",
     "human_type_and_search",
     "human_bezier_move",
     "perform_related_cluster_search",
+    "execute_single_search",
     "get_mobile_access_token",
     "solve_mobile_app_daily_checkin",
+    "claim_daily_checkin",
     "solve_mobile_app_promotions",
     "solve_mobile_app_read_to_earn",
 ]

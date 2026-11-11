@@ -1,2 +1,3 @@
 playwright>=1.40.0
 psutil>=5.9.0
+Pillow>=10.0.0
