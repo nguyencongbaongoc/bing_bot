@@ -10,8 +10,9 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import html
 import random
-from pathlib import Path
 from typing import List, Set, Optional
+
+from core.paths import DATA_DIR, SEARCH_HISTORY_FILE, LEGACY_HISTORY_FILE
 
 # Force UTF-8 encoding for stdout/stderr on Windows (Python 3.7+ reconfigure)
 if sys.platform == "win32":
@@ -23,9 +24,10 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Add parent to path for core imports
-sys.path.insert(0, str(Path(__file__).parent))
-from core.database import get_recent_search_queries, add_search_queries
+# Thư mục lưu lịch sử tìm kiếm
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+HISTORY_FILE = DATA_DIR / "searched_history.json"
+LEGACY_HISTORY_FILE = DATA_DIR / "used_keywords.json"
 
 # Danh sách từ khóa fallback cơ bản
 FALLBACK_KEYWORDS: List[str] = [

@@ -11,7 +11,6 @@ import random
 import time
 import urllib.parse
 import uuid
-from pathlib import Path
 from typing import Optional
 
 import requests
@@ -24,7 +23,6 @@ from core.tracker import (
     _log_warning,
     logger,
 )
-from core.database import get_oauth_tokens, save_oauth_tokens, save_dapi_debug_cache
 
 # Cấu hình OAuth Bing Mobile App
 CLIENT_ID = "0000000040170455"
@@ -50,6 +48,10 @@ SAPPHIRE_HEADERS = {
     "Content-Type": "application/json",
 }
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT_DIR / "data"
+OAUTH_FILE = DATA_DIR / "mobile_oauth.json"
+DEBUG_DAPI_FILE = DATA_DIR / "debug_dapi_me.json"
 
 def get_mobile_access_token(account_id: str = "acc_primary", page: Optional[Page] = None) -> Optional[str]:
     """

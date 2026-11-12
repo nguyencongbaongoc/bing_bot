@@ -10,11 +10,10 @@ import random
 from pathlib import Path
 from patchright.sync_api import sync_playwright
 
+from core.paths import MOBILE_PROFILE, get_edge_executable_path
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-ROOT_DIR = Path(__file__).resolve().parent
-MOBILE_PROFILE = ROOT_DIR / "profiles" / "mobile"
 
 def run_inspection():
     print("=" * 60)
@@ -28,15 +27,22 @@ def run_inspection():
         mobile_device.pop("default_browser_type", None)
 
         print(f"[*] Khởi tạo mobile context (headless={headless})...")
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(MOBILE_PROFILE),
-            channel="msedge",
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
+        edge_path = get_edge_executable_path()
+        launch_kwargs = {
+            "user_data_dir": str(MOBILE_PROFILE),
+            "headless": headless,
+            "args": ["--disable-blink-features=AutomationControlled"],
             **mobile_device,
-            locale="vi-VN",
-            timezone_id="Asia/Ho_Chi_Minh",
-        )
+            "locale": "vi-VN",
+            "timezone_id": "Asia/Ho_Chi_Minh",
+        }
+        
+        if edge_path:
+            launch_kwargs["executable_path"] = edge_path
+        else:
+            launch_kwargs["channel"] = "msedge"
+        
+        context = p.chromium.launch_persistent_context(**launch_kwargs)
 
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(25000)

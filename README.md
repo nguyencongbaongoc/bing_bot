@@ -90,9 +90,9 @@ ms-rewards-bot/
 ## 🚀 Cài đặt nhanh
 
 ### 1. Yêu cầu hệ thống
-- Hệ điều hành: **Windows 10 / 11** (64-bit).
-- **Python 3.9+** (đã tick chọn *"Add python.exe to PATH"* khi cài đặt).
-- **Microsoft Edge** đã cài sẵn trên máy (mặc định trên Windows).
+- Hệ điều hành: **Windows 10 / 11 (64-bit)**, **macOS 12+ (Apple Silicon/Intel)**, hoặc **Linux (x86_64/ARM64)**.
+- **Python 3.9+** (đã tick chọn *"Add python.exe to PATH"* khi cài đặt Windows; trên macOS cài qua Homebrew `brew install python`).
+- **Microsoft Edge** đã cài sẵn (Windows), hoặc tải từ [microsoftedgeinsider.com](https://www.microsoftedgeinsider.com/) (macOS/Linux). Bot sẽ tự động dùng Chromium nội bộ Patchright nếu Edge không có.
 - Kết nối Internet ổn định.
 - *(Tùy chọn)* [Ollama](https://ollama.com/) với mô hình `qwen2.5:3b` nếu muốn bot tự giải các câu hỏi đố vui trắc nghiệm bằng AI cục bộ:
   ```bash
@@ -103,6 +103,7 @@ ms-rewards-bot/
 
 ### 2. Thiết lập trọn gói bằng 1 cú click (Khuyên dùng)
 
+#### Windows
 Chỉ cần nhấp đúp vào file:
 ```cmd
 setup.bat
@@ -111,14 +112,21 @@ Hoặc mở PowerShell tại thư mục dự án và chạy:
 ```powershell
 .\setup.ps1
 ```
+
+#### macOS / Linux
+```bash
+chmod +x setup.command
+./setup.command
+```
+
 Kịch bản tự động sẽ thực hiện toàn bộ:
 1. Kiểm tra Python trên hệ thống.
 2. Khởi tạo môi trường ảo `.venv`.
 3. Nâng cấp `pip` và cài đặt dependencies từ `requirements.txt`.
-4. Cài đặt driver trình duyệt Patchright Edge (`patchright install chromium`).
+4. Cài đặt driver trình duyệt Patchright Chromium (`patchright install chromium`).
 5. Khởi tạo sẵn các thư mục `logs/`, `profiles/desktop`, `profiles/mobile`.
 6. Khởi chạy giao diện `setup_login.py` để bạn đăng nhập tài khoản Microsoft.
-7. Đăng ký Windows Task Scheduler để tự động chạy ngầm mỗi ngày.
+7. (Windows) Đăng ký Windows Task Scheduler để tự động chạy ngầm mỗi ngày.
 
 ---
 
@@ -126,18 +134,21 @@ Kịch bản tự động sẽ thực hiện toàn bộ:
 
 Nếu muốn tự thiết lập từng bước:
 
-```bash
-# Di chuyển vào thư mục bot
+#### Windows
+```cmd
 cd ms-rewards-bot
-
-# Tạo và kích hoạt môi trường ảo
 python -m venv .venv
-.\.venv\Scripts\activate
-
-# Cài đặt thư viện phụ thuộc
+.venv\Scripts\activate
 pip install -r requirements.txt
+patchright install chromium
+```
 
-# Cài đặt browser binary cho Microsoft Edge
+#### macOS / Linux
+```bash
+cd ms-rewards-bot
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 patchright install chromium
 ```
 
@@ -164,7 +175,9 @@ python setup_login.py --both
 
 ## 💻 Hướng dẫn vận hành
 
-### 1. Chạy hàng ngày qua launcher thông minh (`run.bat`)
+### 1. Chạy hàng ngày qua launcher thông minh (Self-Healing)
+
+#### Windows (`run.bat`)
 File `run.bat` được tích hợp cơ chế **Self-Healing**: nếu phát hiện thư mục `.venv` bị thiếu, hỏng đường dẫn hoặc bị lệch ổ đĩa, nó sẽ tự động dọn dẹp và tái tạo lại môi trường:
 ```cmd
 # Chạy mặc định ở chế độ ngầm (headless), tự động Sleep sau khi hoàn tất:
@@ -177,22 +190,55 @@ run.bat --debug
 run.bat --no-sleep
 ```
 
-### 2. Chạy trực tiếp qua Python CLI
+#### macOS / Linux (`run.command`)
+File `run.command` cũng có cơ chế **Self-Healing** tương tự:
 ```bash
+chmod +x run.command  # Chỉ cần chạy lần đầu
+./run.command
+
+# Chạy có giao diện trình duyệt để theo dõi trực quan:
+./run.command --debug
+
+# Chạy không đưa máy vào chế độ Sleep khi hoàn tất:
+./run.command --no-sleep
+```
+
+### 2. Chạy trực tiếp qua Python CLI
+
+#### Windows
+```cmd
 # Chạy mặc định (headless, 30 Desktop, 20 Mobile, tự động Sleep)
-python runner.py
+.venv\Scripts\python.exe runner.py
 
 # Chế độ Debug (hiện giao diện trình duyệt, in log chi tiết)
-python runner.py --debug
+.venv\Scripts\python.exe runner.py --debug
 
 # Tùy chỉnh số lượt tìm kiếm mục tiêu
-python runner.py --desktop-target 30 --mobile-target 20 --batch-size 3
+.venv\Scripts\python.exe runner.py --desktop-target 30 --mobile-target 20 --batch-size 3
 
 # Chạy mà không tự động Sleep máy tính
-python runner.py --no-sleep
+.venv\Scripts\python.exe runner.py --no-sleep
 
 # Chế độ Daemon chạy nền liên tục (tự kiểm tra sau mỗi 4 tiếng)
-python runner.py --daemon --interval 4
+.venv\Scripts\python.exe runner.py --daemon --interval 4
+```
+
+#### macOS / Linux
+```bash
+# Chạy mặc định (headless, 30 Desktop, 20 Mobile, tự động Sleep)
+.venv/bin/python runner.py
+
+# Chế độ Debug (hiện giao diện trình duyệt, in log chi tiết)
+.venv/bin/python runner.py --debug
+
+# Tùy chỉnh số lượt tìm kiếm mục tiêu
+.venv/bin/python runner.py --desktop-target 30 --mobile-target 20 --batch-size 3
+
+# Chạy mà không tự động Sleep máy tính
+.venv/bin/python runner.py --no-sleep
+
+# Chế độ Daemon chạy nền liên tục (tự kiểm tra sau mỗi 4 tiếng)
+.venv/bin/python runner.py --daemon --interval 4
 ```
 
 ### 3. Chạy hoàn toàn ngầm không hiện cửa sổ (Silent Launcher)
@@ -203,9 +249,9 @@ run_task.vbs
 File này sẽ kích hoạt `runner.py` chạy ẩn hoàn toàn trong nền Windows thông qua Windows Script Host, không hề xuất hiện cửa sổ cmd hay làm gián đoạn công việc của bạn.
 
 ---
+## ⏰ Lên lịch tự động
 
-## ⏰ Lên lịch tự động với Windows Task Scheduler
-
+### Windows (Task Scheduler)
 Bạn có thể để máy tính tự động bật dậy cày điểm mỗi ngày mà không cần chạm tay vào:
 
 1. Mở PowerShell với quyền **Run as Administrator**.
@@ -221,6 +267,48 @@ Bạn có thể để máy tính tự động bật dậy cày điểm mỗi ng�
 - **Độ trễ ngẫu nhiên (Random Delay 10 phút)**: Làm lệch các mốc giờ cố định máy móc, ngụy trang tự nhiên với máy chủ Microsoft.
 - **Tự động đánh thức máy (`WakeToRun`)**: Đánh thức máy tính từ chế độ Sleep (nếu phần cứng hỗ trợ).
 - **Yêu cầu mạng (`RunOnlyIfNetworkAvailable`)**: Chỉ kích hoạt khi có kết nối mạng Internet.
+
+### macOS / Linux (cron / systemd)
+Trên macOS/Linux, bạn có thể dùng `cron` hoặc `systemd` để lên lịch chạy tự động:
+
+**cron (chạy mỗi 4 tiếng):**
+```bash
+# Chỉnh sửa crontab
+crontab -e
+
+# Thêm dòng sau (chạy lúc 0:00, 4:00, 8:00, 12:00, 16:00, 20:00)
+0 */4 * * * cd /path/to/ms-rewards-bot && .venv/bin/python runner.py --no-sleep >> logs/cron.log 2>&1
+```
+
+**systemd timer (khuyên dùng cho Linux):**
+```ini
+# /etc/systemd/system/ms-rewards-bot.service
+[Unit]
+Description=MS Rewards Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/ms-rewards-bot
+ExecStart=/path/to/ms-rewards-bot/.venv/bin/python runner.py --no-sleep
+User=youruser
+
+# /etc/systemd/system/ms-rewards-bot.timer
+[Unit]
+Description=Run MS Rewards Bot every 4 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=4h
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Sau đó: `systemctl daemon-reload && systemctl enable --now ms-rewards-bot.timer`
 
 ---
 

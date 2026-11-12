@@ -16,13 +16,10 @@ from patchright.sync_api import Page
 # Use PYTHONUTF8=1 environment variable instead of manual wrapping
 # This avoids issues with stream wrapping in subprocesses
 
-# ==================== LOGGING SETUP ====================
-ROOT_DIR = Path(__file__).resolve().parent.parent
-LOGS_DIR = ROOT_DIR / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
+from core.paths import LOGS_DIR, BOT_LOG_FILE, HISTORY_JSON
 
-BOT_LOG_FILE = LOGS_DIR / "bot.log"
-HISTORY_JSON = LOGS_DIR / "history.json"
+# ==================== LOGGING SETUP ====================
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configure logging - both file and console with immediate flush
 _logger = logging.getLogger("ms_rewards_bot")
