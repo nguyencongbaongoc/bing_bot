@@ -31,6 +31,11 @@ except ImportError:
 
 # Add parent to path for core imports
 sys.path.insert(0, str(Path(__file__).parent))
+from core.paths import (
+    PROJECT_ROOT, DATA_DIR, PROFILES_DIR, LOGS_DIR, DB_PATH,
+    DESKTOP_PROFILE, MOBILE_PROFILE, DAILY_STATE_FILE, POINTS_LEDGER_FILE,
+    ensure_runtime_dirs, get_edge_executable_path, get_python_executable
+)
 from core import (
     fetch_trending_queries,
     get_unique_search_queries,
@@ -81,11 +86,6 @@ from core.tracker import (
 )
 
 # ==================== CONFIGURATION ====================
-ROOT_DIR = Path(__file__).resolve().parent
-DATA_DIR = ROOT_DIR / "data"
-DAILY_STATE_FILE = DATA_DIR / "daily_state.json"
-DESKTOP_PROFILE = ROOT_DIR / "profiles" / "desktop"
-MOBILE_PROFILE = ROOT_DIR / "profiles" / "mobile"
 REWARDS_URL = "https://rewards.bing.com"
 BING_URL = "https://www.bing.com"
 
@@ -285,16 +285,24 @@ def create_desktop_context(playwright, headless: bool, account_id: str = "acc_pr
         "Sec-CH-UA-Mobile": "?0",
     }
 
-    context = playwright.chromium.launch_persistent_context(
-        user_data_dir=str(DESKTOP_PROFILE),
-        channel="msedge",
-        headless=headless,
-        args=args,
-        no_viewport=not headless,
-        locale="vi-VN",
-        timezone_id="Asia/Ho_Chi_Minh",
-        extra_http_headers=extra_headers,
-    )
+    # Dynamic Edge discovery - fallback to bundled Chromium if not found
+    edge_path = get_edge_executable_path()
+    launch_kwargs = {
+        "user_data_dir": str(DESKTOP_PROFILE),
+        "headless": headless,
+        "args": args,
+        "no_viewport": not headless,
+        "locale": "vi-VN",
+        "timezone_id": "Asia/Ho_Chi_Minh",
+        "extra_http_headers": extra_headers,
+    }
+    
+    if edge_path:
+        launch_kwargs["executable_path"] = edge_path
+    else:
+        launch_kwargs["channel"] = "msedge"
+    
+    context = playwright.chromium.launch_persistent_context(**launch_kwargs)
     apply_stealth_scripts(context, is_mobile=False, account_id=account_id)
     return context
 
@@ -320,16 +328,24 @@ def create_mobile_context(playwright, headless: bool, account_id: str = "acc_pri
         "Sec-CH-UA-Model": '"Pixel 7"',
     }
 
-    context = playwright.chromium.launch_persistent_context(
-        user_data_dir=str(MOBILE_PROFILE),
-        channel="msedge",
-        headless=headless,
-        args=args,
+    # Dynamic Edge discovery - fallback to bundled Chromium if not found
+    edge_path = get_edge_executable_path()
+    launch_kwargs = {
+        "user_data_dir": str(MOBILE_PROFILE),
+        "headless": headless,
+        "args": args,
+        "locale": "vi-VN",
+        "timezone_id": "Asia/Ho_Chi_Minh",
+        "extra_http_headers": extra_headers,
         **mobile_device,
-        locale="vi-VN",
-        timezone_id="Asia/Ho_Chi_Minh",
-        extra_http_headers=extra_headers,
-    )
+    }
+    
+    if edge_path:
+        launch_kwargs["executable_path"] = edge_path
+    else:
+        launch_kwargs["channel"] = "msedge"
+    
+    context = playwright.chromium.launch_persistent_context(**launch_kwargs)
     apply_stealth_scripts(context, is_mobile=True, account_id=account_id)
     return context
 
@@ -1101,7 +1117,7 @@ def run_full_pipeline(
 
 
 # ==================== NETWORK & STATE & CACHE GUARD ====================
-POINTS_LEDGER_FILE = DATA_DIR / "points_ledger.json"
+from core.paths import POINTS_LEDGER_FILE
 
 REWARDS_MILESTONES = [
     {"name": "Roblox Digital Card (100 Robux)", "points": 1500},
@@ -1186,7 +1202,7 @@ def save_daily_state(completed_date: str = None, partial: bool = False, checkin_
     - partial=True: ghi nhận tiến độ một phần để chu kỳ sau tiếp tục cày.
     """
     try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_runtime_dirs()
         today_str = completed_date or datetime.date.today().isoformat()
         now_iso = datetime.datetime.now().isoformat()
 
@@ -1233,7 +1249,7 @@ def update_points_ledger(total_points: int, earned_today: int, bing_star_bonus: 
     Lưu thống kê điểm số vào data/points_ledger.json và in ra bảng tổng kết chuyên nghiệp:
     Điểm kiếm được hôm nay, Tổng điểm hiện có, Bing Star bonus, và ước tính tiến độ đổi mốc quà tiếp theo.
     """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_runtime_dirs()
     today_str = datetime.date.today().isoformat()
     now_iso = datetime.datetime.now().isoformat()
 
@@ -1343,7 +1359,7 @@ def purge_profile_caches(profiles_dir: str = "profiles"):
     }
     profiles_path = Path(profiles_dir)
     if not profiles_path.is_absolute():
-        profiles_path = ROOT_DIR / profiles_dir
+        profiles_path = PROFILES_DIR
 
     if not profiles_path.exists():
         return

@@ -172,11 +172,13 @@ WshShell.Run """" & strDir & "\.venv\Scripts\python.exe"" runner.py", 0, False
         Write-WarningMsg "Skipping Task Scheduler (--SkipTaskScheduler used)"
     }
 
-    Write-Header "SETUP COMPLETE!"
+Write-Header "SETUP COMPLETE!"
     Write-Success "System is ready. Usage:"
-    Write-Host "  - Silent background run: Double-click run_task.vbs"
-    Write-Host "  - Debug with UI:         python runner.py --debug"
-    Write-Host "  - View points history:   Open logs\history.json"
+    Write-Host "  - Silent background run (Windows): Double-click run_task.vbs"
+    Write-Host "  - Run bot (Windows):           .\run.bat"
+    Write-Host "  - Run bot (macOS/Linux):       .\run.command"
+    Write-Host "  - Debug with UI:               .venv/Scripts/python.exe runner.py --debug"
+    Write-Host "  - View points history:         Open logs/history.json"
     Write-Host ""
 
 } catch {

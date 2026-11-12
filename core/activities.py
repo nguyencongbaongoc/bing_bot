@@ -20,6 +20,7 @@ from core.searcher import (
     execute_single_search,
     perform_related_cluster_search,
 )
+from core.paths import DATA_DIR, PROFILES_DIR, PROMO_LINKS_FILE
 
 # Use PYTHONUTF8=1 environment variable instead of manual wrapping
 # This avoids issues with stream wrapping in subprocesses
@@ -1809,17 +1810,16 @@ def interact_with_copilot(page: Page, query: str = "Thời tiết hôm nay"):
 def solve_promotional_links(page: Page):
     """Đọc và truy cập các link thưởng khuyến mãi/newsletter từ data/promo_links.json."""
     import json
-    from pathlib import Path
     from core.tracker import _logger as logger
     from core.activities import dismiss_popups
+    from core.paths import PROMO_LINKS_FILE
     
-    promo_file = Path(__file__).resolve().parent.parent / "data" / "promo_links.json"
-    if not promo_file.exists():
+    if not PROMO_LINKS_FILE.exists():
         return
         
     logger.info("--- BẮT ĐẦU: QUÉT LINK KHUYẾN MÃI / NEWSLETTER ---")
     try:
-        with open(promo_file, "r", encoding="utf-8") as f:
+        with open(PROMO_LINKS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             
         links = data.get("pending_links", [])
@@ -1857,8 +1857,8 @@ def get_random_screenshot_path() -> Path | None:
         Path("./screen shot"),
         Path("./Screenshot"),
         Path("./Screenshots"),
-        Path("./data/screenshot"),
-        Path("./data/screenshots"),
+        DATA_DIR / "screenshot",
+        DATA_DIR / "screenshots",
     ]
     
     valid_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -1889,8 +1889,11 @@ def get_random_screenshot_path() -> Path | None:
     return None
 
 
-def create_random_sample_png(filepath: str = "data/visual_sample.png") -> str:
+def create_random_sample_png(filepath: str = None) -> str:
     """Tạo một file ảnh PNG 100x100 RGB hợp lệ có họa tiết màu ngẫu nhiên mỗi lần chạy."""
+    from core.paths import DATA_DIR
+    if filepath is None:
+        filepath = str(DATA_DIR / "visual_sample.png")
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
     width, height = 100, 100
@@ -1919,8 +1922,11 @@ def create_random_sample_png(filepath: str = "data/visual_sample.png") -> str:
     return str(path.resolve())
 
 
-def ensure_sample_image(filepath: str = "data/visual_sample.png") -> str:
+def ensure_sample_image(filepath: str = None) -> str:
     """Tạo file ảnh PNG mẫu 100x100 nếu chưa tồn tại (tương thích ngược)."""
+    from core.paths import DATA_DIR
+    if filepath is None:
+        filepath = str(DATA_DIR / "visual_sample.png")
     p = Path(filepath)
     if not p.exists() or p.stat().st_size == 0:
         return create_random_sample_png(filepath)
@@ -2014,16 +2020,17 @@ def handle_visual_search_streak(page: Page) -> bool:
             # ============================================================
             # BƯỚC 1: Chuẩn bị ảnh upload nhẹ & hợp lệ
             # ============================================================
+            from core.paths import DATA_DIR
             img_path = get_random_screenshot_path()
             if not img_path or not img_path.exists():
-                fallback_path = Path("./data/temp_viewport_capture.png").resolve()
+                fallback_path = DATA_DIR / "temp_viewport_capture.png"
                 fallback_path.parent.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(fallback_path))
                 img_path = fallback_path
                 logger.info(f"   [Visual Search] Sử dụng fallback chụp viewport: '{img_path.name}'")
 
             # Resize ảnh về max 800x600, lưu JPEG 85% để Bing xử lý <1s
-            upload_img_path = Path("./data/temp_vs_upload.jpg").resolve()
+            upload_img_path = DATA_DIR / "temp_vs_upload.jpg"
             upload_img_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 with Image.open(img_path) as im:
@@ -2763,13 +2770,11 @@ def get_daily_search_progress(page: Page) -> dict:
 if __name__ == "__main__":
     # Test nhanh (cần profile đã đăng nhập)
     from patchright.sync_api import sync_playwright
-    from pathlib import Path
-    
-    PROFILE_DIR = Path(__file__).resolve().parent.parent / "profiles" / "desktop"
+    from core.paths import DESKTOP_PROFILE
     
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
+            user_data_dir=str(DESKTOP_PROFILE),
             channel="msedge",
             headless=False,
             args=["--disable-blink-features=AutomationControlled"]

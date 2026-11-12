@@ -13,12 +13,7 @@ from patchright.sync_api import sync_playwright
 # Use PYTHONUTF8=1 environment variable instead of manual wrapping
 # This avoids issues with stream wrapping in subprocesses
 
-
-# Thư mục gốc project
-ROOT_DIR = Path(__file__).parent.resolve()
-PROFILES_DIR = ROOT_DIR / "profiles"
-DESKTOP_PROFILE = PROFILES_DIR / "desktop"
-MOBILE_PROFILE = PROFILES_DIR / "mobile"
+from core.paths import PROJECT_ROOT, PROFILES_DIR, DESKTOP_PROFILE, MOBILE_PROFILE, get_edge_executable_path
 
 # URL trang rewards
 REWARDS_URL = "https://rewards.bing.com"
@@ -143,18 +138,25 @@ def launch_desktop_login() -> bool:
     
     try:
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(DESKTOP_PROFILE),
-                channel="msedge",
-                headless=False,
-                args=[
+            edge_path = get_edge_executable_path()
+            launch_kwargs = {
+                "user_data_dir": str(DESKTOP_PROFILE),
+                "headless": False,
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--start-maximized",
                 ],
-                no_viewport=True,  # Sử dụng kích thước cửa sổ thật
-                locale="vi-VN",
-                timezone_id="Asia/Ho_Chi_Minh",
-            )
+                "no_viewport": True,
+                "locale": "vi-VN",
+                "timezone_id": "Asia/Ho_Chi_Minh",
+            }
+            
+            if edge_path:
+                launch_kwargs["executable_path"] = edge_path
+            else:
+                launch_kwargs["channel"] = "msedge"
+            
+            context = p.chromium.launch_persistent_context(**launch_kwargs)
             apply_stealth_scripts(context, is_mobile=True)
             apply_stealth_scripts(context, is_mobile=False)
             
@@ -213,17 +215,24 @@ def launch_mobile_login(device_name: str, device_preset: str) -> bool:
             device = dict(p.devices[device_preset])
             device.pop('default_browser_type', None)
             
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(MOBILE_PROFILE),
-                channel="msedge",
-                headless=False,
-                args=[
+            edge_path = get_edge_executable_path()
+            launch_kwargs = {
+                "user_data_dir": str(MOBILE_PROFILE),
+                "headless": False,
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                 ],
-                **device,  # Áp dụng viewport, user-agent, is_mobile, has_touch, etc.
-                locale="vi-VN",
-                timezone_id="Asia/Ho_Chi_Minh",
-            )
+                **device,
+                "locale": "vi-VN",
+                "timezone_id": "Asia/Ho_Chi_Minh",
+            }
+            
+            if edge_path:
+                launch_kwargs["executable_path"] = edge_path
+            else:
+                launch_kwargs["channel"] = "msedge"
+            
+            context = p.chromium.launch_persistent_context(**launch_kwargs)
             apply_stealth_scripts(context, is_mobile=True)
             
             page = context.new_page()

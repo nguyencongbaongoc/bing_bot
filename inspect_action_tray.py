@@ -1,13 +1,28 @@
 import sys
 from patchright.sync_api import sync_playwright
 
+from core.paths import MOBILE_PROFILE, get_edge_executable_path
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 with sync_playwright() as p:
     device = dict(p.devices['iPhone 14 Pro'])
     device.pop('default_browser_type', None)
-    ctx = p.chromium.launch_persistent_context('profiles/mobile', channel='msedge', headless=True, **device)
+    
+    edge_path = get_edge_executable_path()
+    launch_kwargs = {
+        "user_data_dir": str(MOBILE_PROFILE),
+        "headless": True,
+        **device,
+    }
+    
+    if edge_path:
+        launch_kwargs["executable_path"] = edge_path
+    else:
+        launch_kwargs["channel"] = "msedge"
+    
+    ctx = p.chromium.launch_persistent_context(**launch_kwargs)
     page = ctx.new_page()
 
     url = 'https://www.msn.com/en-us/sports/soccer/kane-wins-2026-ballon-d-or-result-leaked-as-rankings-announced/ar-AA2g7rsk'
