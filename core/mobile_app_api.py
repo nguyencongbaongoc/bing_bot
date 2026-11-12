@@ -11,6 +11,7 @@ import random
 import time
 import urllib.parse
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -23,6 +24,7 @@ from core.tracker import (
     _log_warning,
     logger,
 )
+from core.database import get_oauth_tokens, save_oauth_tokens, save_dapi_debug_cache
 
 # Cấu hình OAuth Bing Mobile App
 CLIENT_ID = "0000000040170455"
@@ -53,14 +55,8 @@ DATA_DIR = ROOT_DIR / "data"
 OAUTH_FILE = DATA_DIR / "mobile_oauth.json"
 DEBUG_DAPI_FILE = DATA_DIR / "debug_dapi_me.json"
 
+
 def get_mobile_access_token(account_id: str = "acc_primary", page: Optional[Page] = None) -> Optional[str]:
-    """
-    Lấy hoặc làm mới Mobile Access Token cho Bing Mobile App API.
-    1. Nếu database (oauth_tokens) đã có refresh_token -> làm mới qua TOKEN_URL.
-    2. Nếu chưa có hoặc refresh hết hạn -> dùng Playwright page mở AUTH_URL lấy code và đổi token.
-    """
-    # 1. Thử làm mới từ refresh_token trong database
-    oauth_cache = get_oauth_tokens(account_id)
     if oauth_cache:
         refresh_token = oauth_cache.get("refresh_token")
         if refresh_token:

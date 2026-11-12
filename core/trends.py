@@ -12,7 +12,8 @@ import html
 import random
 from typing import List, Set, Optional
 
-from core.paths import DATA_DIR, SEARCH_HISTORY_FILE, LEGACY_HISTORY_FILE
+from core.database import get_recent_search_queries, add_search_queries
+from pathlib import Path
 
 # Force UTF-8 encoding for stdout/stderr on Windows (Python 3.7+ reconfigure)
 if sys.platform == "win32":
@@ -24,10 +25,6 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Thư mục lưu lịch sử tìm kiếm
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-HISTORY_FILE = DATA_DIR / "searched_history.json"
-LEGACY_HISTORY_FILE = DATA_DIR / "used_keywords.json"
 
 # Danh sách từ khóa fallback cơ bản
 FALLBACK_KEYWORDS: List[str] = [
