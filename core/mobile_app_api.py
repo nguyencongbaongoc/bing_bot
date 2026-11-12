@@ -1,6 +1,7 @@
 """
 Module tích hợp tính năng "Read to Earn" (30 điểm/ngày - 10 bài báo x 3 điểm)
 thông qua Bing Mobile App OAuth API chính thức, không cần giả lập Android.
+Phase 7.2: Multi-account support with SQLite database.
 """
 
 import datetime
@@ -23,6 +24,7 @@ from core.tracker import (
     _log_warning,
     logger,
 )
+from core.database import get_oauth_tokens, save_oauth_tokens, save_dapi_debug_cache
 
 # Cấu hình OAuth Bing Mobile App
 CLIENT_ID = "0000000040170455"
@@ -48,54 +50,48 @@ SAPPHIRE_HEADERS = {
     "Content-Type": "application/json",
 }
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT_DIR / "data"
-OAUTH_FILE = DATA_DIR / "mobile_oauth.json"
-DEBUG_DAPI_FILE = DATA_DIR / "debug_dapi_me.json"
 
-
-def get_mobile_access_token(page: Optional[Page] = None) -> Optional[str]:
+def get_mobile_access_token(account_id: str = "acc_primary", page: Optional[Page] = None) -> Optional[str]:
     """
     Lấy hoặc làm mới Mobile Access Token cho Bing Mobile App API.
-    1. Nếu data/mobile_oauth.json đã có refresh_token -> làm mới qua TOKEN_URL.
+    1. Nếu database (oauth_tokens) đã có refresh_token -> làm mới qua TOKEN_URL.
     2. Nếu chưa có hoặc refresh hết hạn -> dùng Playwright page mở AUTH_URL lấy code và đổi token.
     """
-    # 1. Thử làm mới từ refresh_token sẵn có
-    if OAUTH_FILE.exists():
-        try:
-            with open(OAUTH_FILE, "r", encoding="utf-8") as f:
-                oauth_cache = json.load(f)
-            
-            refresh_token = oauth_cache.get("refresh_token")
-            if refresh_token:
-                _log_debug("[Mobile OAuth] Thử làm mới token từ refresh_token...")
-                refresh_data = {
-                    "client_id": CLIENT_ID,
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh_token,
-                    "scope": SCOPE,
-                }
-                res = requests.post(TOKEN_URL, data=refresh_data, timeout=15)
-                if res.status_code == 200:
-                    tokens = res.json()
-                    new_access = tokens.get("access_token")
-                    new_refresh = tokens.get("refresh_token", refresh_token)
-                    if new_access:
-                        oauth_data = {
-                            "access_token": new_access,
-                            "refresh_token": new_refresh,
-                            "updated_at": datetime.datetime.now().isoformat(),
-                        }
-                        with open(OAUTH_FILE, "w", encoding="utf-8") as f:
-                            json.dump(oauth_data, f, indent=2)
-                        _log_info("[Mobile OAuth] Làm mới Access Token thành công.")
-                        return new_access
-                else:
-                    _log_warning(
-                        f"[Mobile OAuth] Làm mới token thất bại (HTTP {res.status_code}). Sẽ thử xác thực qua trình duyệt."
+    # 1. Thử làm mới từ refresh_token trong database
+    oauth_cache = get_oauth_tokens(account_id)
+    if oauth_cache:
+        refresh_token = oauth_cache.get("refresh_token")
+        if refresh_token:
+            _log_debug("[Mobile OAuth] Thử làm mới token từ refresh_token...")
+            refresh_data = {
+                "client_id": CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "scope": SCOPE,
+            }
+            res = requests.post(TOKEN_URL, data=refresh_data, timeout=15)
+            if res.status_code == 200:
+                tokens = res.json()
+                new_access = tokens.get("access_token")
+                new_refresh = tokens.get("refresh_token", refresh_token)
+                expires_in = tokens.get("expires_in")
+                expires_at = None
+                if expires_in:
+                    expires_at = datetime.datetime.now() + datetime.timedelta(seconds=expires_in)
+                if new_access:
+                    save_oauth_tokens(
+                        account_id=account_id,
+                        access_token=new_access,
+                        refresh_token=new_refresh,
+                        expires_at=expires_at.isoformat() if expires_at else None,
+                        client_id=CLIENT_ID
                     )
-        except Exception as e:
-            _log_warning(f"[Mobile OAuth] Không thể đọc cache token: {e}")
+                    _log_info("[Mobile OAuth] Làm mới Access Token thành công.")
+                    return new_access
+            else:
+                _log_warning(
+                    f"[Mobile OAuth] Làm mới token thất bại (HTTP {res.status_code}). Sẽ thử xác thực qua trình duyệt."
+                )
 
     # 2. Xác thực lần đầu hoặc khi refresh_token hết hạn bằng phiên đăng nhập trình duyệt
     if page is None:
@@ -166,16 +162,19 @@ def get_mobile_access_token(page: Optional[Page] = None) -> Optional[str]:
             tokens = res.json()
             access_token = tokens.get("access_token")
             refresh_token = tokens.get("refresh_token")
+            expires_in = tokens.get("expires_in")
+            expires_at = None
+            if expires_in:
+                expires_at = datetime.datetime.now() + datetime.timedelta(seconds=expires_in)
             if access_token:
-                DATA_DIR.mkdir(parents=True, exist_ok=True)
-                oauth_data = {
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "updated_at": datetime.datetime.now().isoformat(),
-                }
-                with open(OAUTH_FILE, "w", encoding="utf-8") as f:
-                    json.dump(oauth_data, f, indent=2)
-                _log_info("[Mobile OAuth] Lấy OAuth token mới thành công và đã lưu vào data/mobile_oauth.json!")
+                save_oauth_tokens(
+                    account_id=account_id,
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                    expires_at=expires_at.isoformat() if expires_at else None,
+                    client_id=CLIENT_ID
+                )
+                _log_info("[Mobile OAuth] Lấy OAuth token mới thành công và đã lưu vào database!")
                 return access_token
         else:
             _log_warning(f"[Mobile OAuth] Đổi code thất bại (HTTP {res.status_code}): {res.text[:100]}")
@@ -309,28 +308,11 @@ def _get_checkin_promotion(access_token: str, country: str = "vn") -> dict:
         # Debug JSON logging when --debug flag is active
         if logger.isEnabledFor(logging.DEBUG):
             try:
-                DATA_DIR.mkdir(parents=True, exist_ok=True)
-                with open(DEBUG_DAPI_FILE, "w", encoding="utf-8") as f:
-                    json.dump(raw_json, f, indent=2, ensure_ascii=False)
-                _log_info(f"[DEBUG] DAPI raw JSON saved to {DEBUG_DAPI_FILE}")
-                
-                # Log summary of root keys and promotions
-                root = raw_json.get("response", raw_json) if isinstance(raw_json, dict) else raw_json
-                if isinstance(root, dict):
-                    _log_debug(f"[DEBUG] [DAPI Root Keys] {list(root.keys())}")
-                    promos = root.get("promotions", [])
-                    if isinstance(promos, list):
-                        for p in promos:
-                            if isinstance(p, dict):
-                                name = p.get("name") or p.get("title") or p.get("id") or "unknown"
-                                offerid = p.get("offerid") or p.get("offerId") or p.get("attributes", {}).get("offerid") or ""
-                                ptype = p.get("type", "")
-                                complete = p.get("complete", False)
-                                progress = p.get("progress", 0)
-                                max_val = p.get("max", 1)
-                                _log_debug(f"[DEBUG] [DAPI Promo] name={name} | offerid={offerid} | type={ptype} | complete={complete} | progress={progress}/{max_val}")
+                raw_json_str = json.dumps(raw_json, ensure_ascii=False)
+                save_dapi_debug_cache(account_id, "BingApp", raw_json_str)
+                _log_info(f"[DEBUG] DAPI raw JSON saved to database for {account_id}")
             except Exception as e:
-                _log_debug(f"[DEBUG] Failed to write debug JSON: {e}")
+                _log_debug(f"[DEBUG] Failed to save debug JSON to database: {e}")
         
         if isinstance(raw_json, list):
             promotions = [p for p in raw_json if isinstance(p, dict)]
@@ -394,14 +376,14 @@ def _submit_checkin_activity(headers: dict, country: str, offer_id: Optional[str
     }
 
 
-def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "vn") -> int:
+def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "vn", account_id: str = "acc_primary") -> int:
     """
     Thực hiện Điểm danh 7 ngày (Daily Check-in - type 103) qua Bing Mobile App OAuth API.
     Trích xuất promotion_id/checkinDay động, đối soát biến động điểm thực tế trước và sau khi claim.
     Trả về số điểm nhận thêm (nếu có).
     """
     logger.info("--- BẮT ĐẦU: DAILY CHECK-IN (BING MOBILE APP API - TYPE 103) ---")
-    access_token = get_mobile_access_token(page)
+    access_token = get_mobile_access_token(account_id, page)
     if not access_token:
         logger.warning("[App Check-in] Không lấy được OAuth access_token, bỏ qua bước này.")
         return 0
@@ -489,13 +471,13 @@ def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "
 claim_daily_checkin = solve_mobile_app_daily_checkin
 
 
-def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn") -> int:
+def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn", account_id: str = "acc_primary") -> int:
     """
     Quét danh sách Promotions trên Bing Mobile App qua GET /dapi/me?channel=BingApp&options=613.
     Kiểm tra các nhiệm vụ App chưa hoàn thành và claim qua API nếu có.
     """
     logger.info("--- BẮT ĐẦU: QUÉT APP PROMOTIONS (BING MOBILE APP API) ---")
-    access_token = get_mobile_access_token(page)
+    access_token = get_mobile_access_token(account_id, page)
     if not access_token:
         logger.warning("[App Promotions] Không lấy được OAuth access_token, bỏ qua bước này.")
         return 0
@@ -521,25 +503,11 @@ def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn"
             # Debug JSON logging when --debug flag is active
             if logger.isEnabledFor(logging.DEBUG):
                 try:
-                    DATA_DIR.mkdir(parents=True, exist_ok=True)
-                    with open(DEBUG_DAPI_FILE, "w", encoding="utf-8") as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                    _log_info(f"[DEBUG] DAPI raw JSON saved to {DEBUG_DAPI_FILE}")
-                    
-                    root = data.get("response", data) if isinstance(data, dict) else data
-                    if isinstance(root, dict):
-                        _log_debug(f"[DEBUG] [DAPI Root Keys] {list(root.keys())}")
-                        for p in promotions:
-                            if isinstance(p, dict):
-                                name = p.get("name") or p.get("title") or p.get("id") or "unknown"
-                                offerid = p.get("offerid") or p.get("offerId") or p.get("attributes", {}).get("offerid") or ""
-                                ptype = p.get("type", "")
-                                complete = p.get("complete", False)
-                                progress = p.get("progress", 0)
-                                max_val = p.get("max", 1)
-                                _log_debug(f"[DEBUG] [DAPI Promo] name={name} | offerid={offerid} | type={ptype} | complete={complete} | progress={progress}/{max_val}")
+                    raw_json_str = json.dumps(data, ensure_ascii=False)
+                    save_dapi_debug_cache(account_id, "BingApp", raw_json_str)
+                    _log_info(f"[DEBUG] DAPI raw JSON saved to database for {account_id}")
                 except Exception as e:
-                    _log_debug(f"[DEBUG] Failed to write debug JSON: {e}")
+                    _log_debug(f"[DEBUG] Failed to save debug JSON to database: {e}")
 
             # Lọc các promotions chưa hoàn thành
             uncompleted_promos = []
@@ -592,13 +560,13 @@ def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn"
     return claimed_count
 
 
-def solve_mobile_app_read_to_earn(page: Optional[Page] = None, country: str = "vn") -> int:
+def solve_mobile_app_read_to_earn(page: Optional[Page] = None, country: str = "vn", account_id: str = "acc_primary") -> int:
     """
     Thực hiện nhiệm vụ "Read to Earn" trên App Bing Mobile (tối đa 10 bài x 3 điểm = 30 điểm/ngày).
     Gọi trực tiếp API https://prod.rewardsplatform.microsoft.com/dapi/me/activities.
     """
     _log_info("--- BẮT ĐẦU: READ TO EARN (BING MOBILE APP API) ---")
-    access_token = get_mobile_access_token(page)
+    access_token = get_mobile_access_token(account_id, page)
     if not access_token:
         _log_warning("[Read to Earn] Không lấy được mobile access token. Bỏ qua Read to Earn.")
         return 0
