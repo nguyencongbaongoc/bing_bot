@@ -5,6 +5,7 @@ thông qua Bing Mobile App OAuth API chính thức, không cần giả lập And
 
 import datetime
 import json
+import logging
 import random
 import time
 import urllib.parse
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import requests
-from playwright.sync_api import Page
+from patchright.sync_api import Page
 
 from core.tracker import (
     _log_debug,
@@ -33,10 +34,24 @@ AUTH_URL = (
 )
 TOKEN_URL = "https://login.live.com/oauth20_token.srf"
 ACTIVITIES_API_URL = "https://prod.rewardsplatform.microsoft.com/dapi/me/activities"
+REWARDS_API_BASE = "https://prod.rewardsplatform.microsoft.com/dapi"
+
+SAPPHIRE_HEADERS = {
+    "User-Agent": "BingSapphire/29.5.2110003554 (Linux; U; Android 14; en_US; Pixel 8; Build/UP1A.231005.007)",
+    "X-Requested-With": "com.microsoft.bing",
+    "X-Rewards-PartnerId": "startapp",
+    "X-Rewards-Country": "vn",
+    "X-Rewards-Language": "en",
+    "X-Rewards-IsMobile": "true",
+    "Accept": "application/json",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+    "Content-Type": "application/json",
+}
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 OAUTH_FILE = DATA_DIR / "mobile_oauth.json"
+DEBUG_DAPI_FILE = DATA_DIR / "debug_dapi_me.json"
 
 
 def get_mobile_access_token(page: Optional[Page] = None) -> Optional[str]:
@@ -179,10 +194,210 @@ def get_mobile_access_token(page: Optional[Page] = None) -> Optional[str]:
     return None
 
 
+def _build_sapphire_headers(access_token: str, country: str = "vn") -> dict:
+    headers = dict(SAPPHIRE_HEADERS)
+    headers["Authorization"] = f"Bearer {access_token}"
+    headers["X-Rewards-Country"] = country.upper()
+    headers["X-Rewards-Language"] = "vi"
+    return headers
+
+
+def _extract_balance(payload) -> Optional[float]:
+    if not isinstance(payload, dict):
+        return None
+    candidates = [
+        payload.get("balance"),
+        payload.get("response", {}).get("balance") if isinstance(payload.get("response"), dict) else None,
+        payload.get("userStatus", {}).get("balance") if isinstance(payload.get("userStatus"), dict) else None,
+        payload.get("counters", {}).get("points", {}).get("balance")
+        if isinstance(payload.get("counters"), dict)
+        and isinstance(payload["counters"].get("points"), dict)
+        else None,
+    ]
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _activity_awarded_points(data) -> int:
+    if not isinstance(data, dict):
+        return 0
+    body = data.get("response", data)
+    if not isinstance(body, dict):
+        return 0
+    activity = body.get("activity")
+    if isinstance(activity, dict):
+        for key in ("p", "points", "pointValue", "awarded"):
+            value = activity.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return int(value)
+    return 0
+
+
+def _get_balance(access_token: str, country: str = "vn") -> Optional[float]:
+    headers = _build_sapphire_headers(access_token, country)
+    # Use DAPI endpoint with options=613 for complete user data
+    resp = requests.get(f"{REWARDS_API_BASE}/me?channel=BingApp&options=613", headers=headers, timeout=15)
+    if resp.status_code != 200:
+        _log_warning(f"[App Check-in] Đọc balance thất bại (HTTP {resp.status_code}).")
+        return None
+    return _extract_balance(resp.json())
+
+
+def _extract_promotion_id(promotions) -> Optional[str]:
+    for promo in promotions:
+        if not isinstance(promo, dict):
+            continue
+        name_parts = " ".join(
+            str(promo.get(key, ""))
+            for key in ("name", "title", "promotionName", "offerId", "id", "type")
+        ).lower()
+        # Check for check-in related keywords and type 103
+        keywords = ("checkin", "check-in", "check_in", "daily_streak", "sapphire_checkin", "103")
+        if any(keyword in name_parts for keyword in keywords):
+            return promo.get("id") or promo.get("name") or promo.get("offerId") or promo.get("offerid")
+        # Also check type field specifically for 103
+        ptype = str(promo.get("type", "")).lower()
+        if "103" in ptype:
+            return promo.get("id") or promo.get("name") or promo.get("offerId") or promo.get("offerid")
+    return None
+
+
+def _extract_checkin_day(promotions, promotion_id: str) -> int:
+    for promo in promotions:
+        if not isinstance(promo, dict) or (promo.get("id") or promo.get("name")) != promotion_id:
+            continue
+        attrs = promo.get("attributes") or {}
+        for key in ("checkinDay", "currentDay", "streakDay", "day"):
+            value = attrs.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+        if isinstance(attrs.get("streak"), dict):
+            value = attrs["streak"].get("current")
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+        progress = int(promo.get("progress") or 0)
+        if progress > 0:
+            return progress + 1
+    return 1
+
+
+def _get_checkin_promotion(access_token: str, country: str = "vn") -> dict:
+    headers = _build_sapphire_headers(access_token, country)
+    # Primary DAPI endpoint with options=613 as per protocol
+    endpoints = (
+        f"{REWARDS_API_BASE}/me?channel=BingApp&options=613",
+        f"{REWARDS_API_BASE}/me?channel=StartApp&options=613",
+        f"{REWARDS_API_BASE}/me/promotions?channel=BingApp",
+    )
+    promotions = []
+    raw_json = None
+    for url in endpoints:
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+        except Exception as e:
+            _log_debug(f"[App Check-in] Lỗi GET promotions ({url}): {e}")
+            continue
+        if resp.status_code != 200:
+            _log_debug(f"[App Check-in] Đọc promotions thất bại ({url}, HTTP {resp.status_code}).")
+            continue
+        raw_json = resp.json()
+        
+        # Debug JSON logging when --debug flag is active
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                DATA_DIR.mkdir(parents=True, exist_ok=True)
+                with open(DEBUG_DAPI_FILE, "w", encoding="utf-8") as f:
+                    json.dump(raw_json, f, indent=2, ensure_ascii=False)
+                _log_info(f"[DEBUG] DAPI raw JSON saved to {DEBUG_DAPI_FILE}")
+                
+                # Log summary of root keys and promotions
+                root = raw_json.get("response", raw_json) if isinstance(raw_json, dict) else raw_json
+                if isinstance(root, dict):
+                    _log_debug(f"[DEBUG] [DAPI Root Keys] {list(root.keys())}")
+                    promos = root.get("promotions", [])
+                    if isinstance(promos, list):
+                        for p in promos:
+                            if isinstance(p, dict):
+                                name = p.get("name") or p.get("title") or p.get("id") or "unknown"
+                                offerid = p.get("offerid") or p.get("offerId") or p.get("attributes", {}).get("offerid") or ""
+                                ptype = p.get("type", "")
+                                complete = p.get("complete", False)
+                                progress = p.get("progress", 0)
+                                max_val = p.get("max", 1)
+                                _log_debug(f"[DEBUG] [DAPI Promo] name={name} | offerid={offerid} | type={ptype} | complete={complete} | progress={progress}/{max_val}")
+            except Exception as e:
+                _log_debug(f"[DEBUG] Failed to write debug JSON: {e}")
+        
+        if isinstance(raw_json, list):
+            promotions = [p for p in raw_json if isinstance(p, dict)]
+        else:
+            body = raw_json.get("response", raw_json) if isinstance(raw_json, dict) else {}
+            raw_promotions = body.get("promotions") if isinstance(body, dict) else None
+            promotions = [p for p in (raw_promotions or []) if isinstance(p, dict)]
+            
+            # Also check streak, punchCards, morePromotions if available
+            for extra_key in ("streak", "punchCards", "morePromotions"):
+                extra = body.get(extra_key)
+                if isinstance(extra, list):
+                    promotions.extend([p for p in extra if isinstance(p, dict)])
+                    
+        if promotions:
+            break
+    
+    promotion_id = _extract_promotion_id(promotions)
+    if not promotion_id:
+        return {}
+    return {
+        "promotion_id": promotion_id,
+        "checkin_day": _extract_checkin_day(promotions or [], promotion_id),
+        "attributes": next(
+            (p.get("attributes") or {} for p in (promotions or [])
+             if (p.get("id") or p.get("name")) == promotion_id),
+            {},
+        ),
+    }
+
+
+def _submit_checkin_activity(headers: dict, country: str, offer_id: Optional[str]) -> dict:
+    """
+    Gửi payload check-in chuẩn DAPI type 103.
+    Payload: id (uuid4), type: 103, amount: 1, country, risk_context, attributes.offerid
+    """
+    payload = {
+        "id": str(uuid.uuid4()),
+        "type": 103,
+        "amount": 1,
+        "country": country.lower(),
+        "risk_context": {
+            "app": "BingSapphire",
+            "platform": "Android"
+        },
+        "attributes": {
+            "offerid": offer_id
+        }
+    }
+    resp = requests.post(ACTIVITIES_API_URL, json=payload, headers=headers, timeout=15)
+    if resp.status_code != 200:
+        return {"ok": False, "status": resp.status_code, "body": resp.text[:150]}
+    data = resp.json()
+    return {
+        "ok": True,
+        "status": resp.status_code,
+        "balance": _extract_balance(data),
+        "points_awarded": _activity_awarded_points(data),
+        "offer_id": offer_id,
+        "duplicate": bool(isinstance(data, dict) and data.get("response", {}).get("isDuplicate")),
+    }
+
+
 def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "vn") -> int:
     """
     Thực hiện Điểm danh 7 ngày (Daily Check-in - type 103) qua Bing Mobile App OAuth API.
-    Kiểm tra chéo số dư thực tế trước và sau khi gửi request.
+    Trích xuất promotion_id/checkinDay động, đối soát biến động điểm thực tế trước và sau khi claim.
     Trả về số điểm nhận thêm (nếu có).
     """
     logger.info("--- BẮT ĐẦU: DAILY CHECK-IN (BING MOBILE APP API - TYPE 103) ---")
@@ -191,70 +406,83 @@ def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "
         logger.warning("[App Check-in] Không lấy được OAuth access_token, bỏ qua bước này.")
         return 0
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "User-Agent": "Bing/28.8.420227017 (Pixel 7; Android 14) Sapphire/1.0",
-        "Content-Type": "application/json",
-        "X-Rewards-Country": country.lower(),
-        "X-Rewards-Language": "vi",
-    }
+    headers = _build_sapphire_headers(access_token, country)
 
-    # Ghi nhận balance trước khi gửi request
-    old_balance = None
+    # 3.1 Warm-up & đọc balance trước khi claim
+    start_balance = None
     try:
-        me_resp = requests.get(
-            "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=BingApp",
-            headers=headers,
-            timeout=10,
-        )
-        if me_resp.status_code == 200:
-            old_balance = me_resp.json().get("response", {}).get("balance")
+        start_balance = _get_balance(access_token, country)
+        if start_balance is not None:
+            logger.info(f"[App Check-in] Số dư trước điểm danh: {start_balance:,.0f} pts")
+        else:
+            logger.debug("[App Check-in] Không đọc được balance trước check-in.")
     except Exception as e:
         logger.debug(f"[App Check-in] Không thể đọc balance trước check-in: {e}")
 
-    payload = {
-        "amount": 1,
-        "attributes": {},
-        "id": str(uuid.uuid4()),
-        "type": 103,
-        "country": country.lower(),
-        "risk_context": {},
-        "channel": "BingApp",
-    }
-
+    # 3.2 Bóc tách promotion động (promotion_id, current_day, attributes)
+    promotion = {}
     try:
-        resp = requests.post(
-            ACTIVITIES_API_URL,
-            json=payload,
-            headers=headers,
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            resp_obj = data.get("response", {}) if isinstance(data, dict) else {}
-            new_balance = resp_obj.get("balance")
-            activity_obj = resp_obj.get("activity") or {}
-            points_awarded = activity_obj.get("p", 0) if isinstance(activity_obj, dict) else 0
-
-            # Kiểm tra xem điểm có thực sự tăng không
-            pts_gained = 0
-            if old_balance is not None and new_balance is not None:
-                pts_gained = max(0, new_balance - old_balance)
-            elif points_awarded > 0:
-                pts_gained = points_awarded
-
-            if pts_gained > 0 or (old_balance is not None and new_balance is not None and new_balance > old_balance):
-                actual_gain = pts_gained if pts_gained > 0 else (new_balance - old_balance)
-                logger.info(f"[App Check-in] [✓] API type 103 cộng điểm thành công (+{actual_gain} pts)!")
-                return actual_gain
-            else:
-                logger.info("[App Check-in] [*] API type 103 trả về 200 nhưng số dư không đổi (+0 pts). Cần kích hoạt qua Mobile UI.")
+        promotion = _get_checkin_promotion(access_token, country)
+        if promotion.get("promotion_id"):
+            logger.info(
+                f"[App Check-in] Trích xuất nhiệm vụ động: promotion_id={promotion['promotion_id']}, "
+                f"checkin_day={promotion['checkin_day']}"
+            )
+            attrs = promotion.get("attributes", {})
+            # Check if already completed today
+            complete_val = attrs.get("complete")
+            if complete_val in ("True", True):
+                logger.info(f"[App Check-in] [✓] Hôm nay đã điểm danh trên hệ thống trước đó (attributes.complete={complete_val}).")
                 return 0
         else:
-            logger.debug(f"[App Check-in] Phản hồi HTTP {resp.status_code}: {resp.text[:150]}")
+            logger.info("[App Check-in] Không tìm thấy promotion check-in/streak, dùng payload 103 tiêu chuẩn.")
+    except Exception as e:
+        logger.debug(f"[App Check-in] Không thể trích xuất promotion động: {e}")
+
+    # 3.3 Gửi payload claim chuẩn (dynamic khi có promotion_id, fallback 103)
+    # Extract offer_id from promotion attributes
+    offer_id = None
+    if promotion.get("attributes"):
+        offer_id = promotion["attributes"].get("offerid") or promotion["attributes"].get("offerId")
+    if not offer_id:
+        offer_id = promotion.get("promotion_id") or "sapphire_checkin"
+    
+    country_code = country.lower()
+    
+    result = {}
+    try:
+        result = _submit_checkin_activity(headers, country_code, offer_id)
     except Exception as e:
         logger.warning(f"[App Check-in] Lỗi khi gửi request điểm danh API: {e}")
+        return 0
 
+    if not result.get("ok"):
+        logger.debug(
+            f"[App Check-in] Phản hồi HTTP {result.get('status')}: {result.get('body', '')}"
+        )
+        return 0
+
+    # 3.4 Nghỉ 3s và đối soát biến động điểm thực tế
+    time.sleep(3.0)
+    end_balance = None
+    try:
+        end_balance = _get_balance(access_token, country)
+        if end_balance is not None:
+            logger.info(f"[App Check-in] Số dư sau điểm danh: {end_balance:,.0f} pts")
+    except Exception as e:
+        logger.debug(f"[App Check-in] Không thể đối soát balance sau check-in: {e}")
+
+    delta = 0
+    if start_balance is not None and end_balance is not None:
+        delta = int(round(end_balance - start_balance))
+    elif result.get("points_awarded"):
+        delta = int(result["points_awarded"])
+
+    if delta > 0:
+        logger.info(f"[App Check-in] [✓] Đã kích hoạt điểm danh thành công (+{delta} pts)!")
+        return delta
+
+    logger.info("[App Check-in] [*] Điểm danh không tăng điểm (đã điểm danh trước đó hoặc cần claim qua Mobile UI fallback).")
     return 0
 
 
@@ -272,13 +500,7 @@ def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn"
         logger.warning("[App Promotions] Không lấy được OAuth access_token, bỏ qua bước này.")
         return 0
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "User-Agent": "Bing/28.8.420227017 (Pixel 7; Android 14) Sapphire/1.0",
-        "Content-Type": "application/json",
-        "X-Rewards-Country": country.lower(),
-        "X-Rewards-Language": "vi",
-    }
+    headers = _build_sapphire_headers(access_token, country)
 
     url = "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=BingApp&options=613"
     claimed_count = 0
@@ -290,6 +512,35 @@ def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn"
             resp_body = data.get("response", {})
             promotions = resp_body.get("promotions") or []
             
+            # Also check streak, punchCards, morePromotions if available
+            for extra_key in ("streak", "punchCards", "morePromotions"):
+                extra = resp_body.get(extra_key)
+                if isinstance(extra, list):
+                    promotions.extend([p for p in extra if isinstance(p, dict)])
+            
+            # Debug JSON logging when --debug flag is active
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    DATA_DIR.mkdir(parents=True, exist_ok=True)
+                    with open(DEBUG_DAPI_FILE, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    _log_info(f"[DEBUG] DAPI raw JSON saved to {DEBUG_DAPI_FILE}")
+                    
+                    root = data.get("response", data) if isinstance(data, dict) else data
+                    if isinstance(root, dict):
+                        _log_debug(f"[DEBUG] [DAPI Root Keys] {list(root.keys())}")
+                        for p in promotions:
+                            if isinstance(p, dict):
+                                name = p.get("name") or p.get("title") or p.get("id") or "unknown"
+                                offerid = p.get("offerid") or p.get("offerId") or p.get("attributes", {}).get("offerid") or ""
+                                ptype = p.get("type", "")
+                                complete = p.get("complete", False)
+                                progress = p.get("progress", 0)
+                                max_val = p.get("max", 1)
+                                _log_debug(f"[DEBUG] [DAPI Promo] name={name} | offerid={offerid} | type={ptype} | complete={complete} | progress={progress}/{max_val}")
+                except Exception as e:
+                    _log_debug(f"[DEBUG] Failed to write debug JSON: {e}")
+
             # Lọc các promotions chưa hoàn thành
             uncompleted_promos = []
             for p in promotions:

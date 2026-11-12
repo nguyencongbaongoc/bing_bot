@@ -56,11 +56,11 @@ echo [2/3] Đang cài đặt thư viện cần thiết...
 if exist "%~dp0requirements.txt" (
     "%~dp0.venv\Scripts\pip.exe" install -r "%~dp0requirements.txt"
 ) else (
-    "%~dp0.venv\Scripts\pip.exe" install playwright requests psutil
+    "%~dp0.venv\Scripts\pip.exe" install patchright requests psutil
 )
 
-echo [3/3] Đang cài đặt trình duyệt Playwright...
-"%~dp0.venv\Scripts\python.exe" -m playwright install
+echo [3/3] Đang cài đặt trình duyệt Patchright...
+"%~dp0.venv\Scripts\python.exe" -m patchright install chromium
 
 echo.
 echo ============================================================

@@ -1,5 +1,5 @@
 import sys
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

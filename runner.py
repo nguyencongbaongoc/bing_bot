@@ -65,9 +65,9 @@ from core.activities import (
     dismiss_popups,
     claim_all_available_rewards,
     extract_bing_star_bonus,
-    activate_mobile_app_card,
 )
 from core.searcher import human_type_and_search
+from core.fingerprint import inject_stealth_fingerprint, get_deterministic_hardware_profile
 from core.tracker import (
     init_session,
     update_session,
@@ -89,6 +89,7 @@ MOBILE_PROFILE = ROOT_DIR / "profiles" / "mobile"
 REWARDS_URL = "https://rewards.bing.com"
 BING_URL = "https://www.bing.com"
 
+ACCOUNT_ID = "acc_primary"
 DEFAULT_TIMEOUT = 8000  # 8 seconds default timeout
 
 # Tham số khởi động trình duyệt tối ưu phần cứng & ngụy trang chống phát hiện:
@@ -109,13 +110,13 @@ BROWSER_ARGS = [
 
 
 def get_sync_playwright():
-    """Import Playwright only when the browser pipeline is started."""
+    """Import Patchright only when the browser pipeline is started."""
     try:
-        return importlib.import_module("playwright.sync_api").sync_playwright
+        return importlib.import_module("patchright.sync_api").sync_playwright
     except ModuleNotFoundError as exc:
-        if exc.name == "playwright" or (exc.name and exc.name.startswith("playwright.")):
+        if exc.name == "patchright" or (exc.name and exc.name.startswith("patchright.")):
             raise RuntimeError(
-                "Playwright is required. Install it with 'pip install playwright'."
+                "Patchright is required. Install it with 'pip install patchright' and run 'patchright install chromium'."
             ) from exc
         raise
 
@@ -202,18 +203,21 @@ def active_edge_browsing_cooldown(page, total_seconds: int = 900):
     return page
 
 
-def apply_stealth_scripts(context, is_mobile: bool = False, cpu_threads: int = None):
-    """Tiêm script xóa dấu vết tự động hóa của Playwright/CDP và đồng bộ User-Agent Client Hints, hardwareConcurrency, deviceMemory."""
+def apply_stealth_scripts(context, is_mobile: bool = False, cpu_threads: int = None, account_id: str = "acc_primary"):
+    """Tiêm script xóa dấu vết tự động hóa của Patchright/CDP và đồng bộ User-Agent Client Hints, hardwareConcurrency, deviceMemory."""
     platform_val = "Linux armv8l" if is_mobile else "Win32"
     ua_platform = "Android" if is_mobile else "Windows"
     is_mob_js = "true" if is_mobile else "false"
     model_val = "Pixel 7" if is_mobile else ""
     platform_version = "14.0.0" if is_mobile else "15.0.0"
     arch_val = "arm" if is_mobile else "x86"
-    if cpu_threads is None:
-        cpu_threads = os.cpu_count() or 4
-    hw_concurrency = 8 if is_mobile else cpu_threads
-    device_memory = 8
+    profile = get_deterministic_hardware_profile(account_id)
+    if is_mobile:
+        hw_concurrency = 8
+        device_memory = 8
+    else:
+        hw_concurrency = cpu_threads or profile["hardware_concurrency"]
+        device_memory = profile["device_memory"]
 
     stealth_js = f"""
     // 1. Xóa cờ webdriver
@@ -265,9 +269,10 @@ def apply_stealth_scripts(context, is_mobile: bool = False, cpu_threads: int = N
     }} catch(e) {{}}
     """
     context.add_init_script(stealth_js)
+    inject_stealth_fingerprint(context, account_id=account_id)
 
 
-def create_desktop_context(playwright, headless: bool):
+def create_desktop_context(playwright, headless: bool, account_id: str = "acc_primary"):
     """Tạo Desktop persistent context với chế độ ngụy trang (Stealth)."""
     args = list(BROWSER_ARGS)
     if headless:
@@ -290,11 +295,11 @@ def create_desktop_context(playwright, headless: bool):
         timezone_id="Asia/Ho_Chi_Minh",
         extra_http_headers=extra_headers,
     )
-    apply_stealth_scripts(context, is_mobile=False)
+    apply_stealth_scripts(context, is_mobile=False, account_id=account_id)
     return context
 
 
-def create_mobile_context(playwright, headless: bool):
+def create_mobile_context(playwright, headless: bool, account_id: str = "acc_primary"):
     """Tạo Mobile emulation persistent context giả lập Android (Pixel 7)."""
     mobile_device = dict(playwright.devices["Pixel 7"])
     mobile_device.pop("default_browser_type", None)
@@ -325,7 +330,7 @@ def create_mobile_context(playwright, headless: bool):
         timezone_id="Asia/Ho_Chi_Minh",
         extra_http_headers=extra_headers,
     )
-    apply_stealth_scripts(context, is_mobile=True)
+    apply_stealth_scripts(context, is_mobile=True, account_id=account_id)
     return context
 
 
@@ -355,7 +360,7 @@ def ensure_desktop_page(d_context, playwright_instance, headless: bool):
 
     # Khởi tạo lại Desktop context sạch sẽ
     try:
-        new_context = create_desktop_context(playwright_instance, headless)
+        new_context = create_desktop_context(playwright_instance, headless, account_id=ACCOUNT_ID)
         new_page = new_context.pages[0] if new_context.pages else new_context.new_page()
         new_page.set_default_timeout(DEFAULT_TIMEOUT)
         return new_context, new_page
@@ -390,7 +395,7 @@ def ensure_mobile_page(m_context, playwright_instance, headless: bool):
 
     # Khởi tạo lại Mobile context sạch sẽ
     try:
-        new_context = create_mobile_context(playwright_instance, headless)
+        new_context = create_mobile_context(playwright_instance, headless, account_id=ACCOUNT_ID)
         new_page = new_context.pages[0] if new_context.pages else new_context.new_page()
         new_page.set_default_timeout(DEFAULT_TIMEOUT)
         return new_context, new_page
@@ -490,7 +495,7 @@ def run_full_pipeline(
     all_tasks_completed = False
     all_maxed = False
     all_activities_done = False
-    retry_count = getattr(args, "retry_count", 0) if args else 0
+    checkin_awarded = 0
 
     try:
         # Network Guard: Chờ kết nối Internet ổn định tối đa 60s sau khi máy thức dậy từ Sleep
@@ -573,18 +578,12 @@ def run_full_pipeline(
 
                     # Điểm danh 7 ngày trên App Bing bằng OAuth API (type: 103)
                     try:
-                        solve_mobile_app_daily_checkin(d_page)
+                        checkin_awarded = solve_mobile_app_daily_checkin(d_page)
                         sleep_time = random.uniform(2.0, 4.0)
-                        _log_debug(f"[App Check-in] Nghỉ {sleep_time:.1f}s trước khi kích hoạt Mobile UI...")
+                        _log_debug(f"[App Check-in] Nghỉ {sleep_time:.1f}s sau khi gọi API check-in...")
                         time.sleep(sleep_time)
                     except Exception as e:
                         _log_warning(f"Lỗi khi xử lý Mobile App Daily Check-in: {e}")
-
-                    # Kích hoạt thẻ Mobile App thật sự bằng CDP Mobile Emulation (BingSapphire)
-                    try:
-                        activate_mobile_app_card(d_page)
-                    except Exception as e:
-                        _log_warning(f"Lỗi khi kích hoạt Mobile App Card qua CDP Emulation: {e}")
 
                     # Quét App Promotions (GET /dapi/me) để thu thập điểm ẩn
                     try:
@@ -1027,14 +1026,25 @@ def run_full_pipeline(
             finish_session(end_points, status=status_str)
 
             today_str = datetime.date.today().isoformat()
-            can_lock_day = (
-                all_maxed and (all_activities_done or retry_count >= 3)
-            )
+            can_lock_day = all_maxed and all_activities_done
             if can_lock_day:
                 _log_info("[Daily Lock] Đã hoàn thành 100% mục tiêu. Ghi nhận khóa ngày vào daily_state.json.")
-                save_daily_state(completed_date=today_str)
+                save_daily_state(
+                    completed_date=today_str,
+                    partial=False,
+                    checkin_awarded=checkin_awarded,
+                )
             else:
-                _log_info("[Daily Lock] Còn nhiệm vụ/điểm chưa đạt 100% (Visual Search hoặc Search). Không khóa daily_state để chu kỳ sau cày tiếp.")
+                _log_info(
+                    f"[Daily Lock] Còn nhiệm vụ/điểm chưa đạt 100% "
+                    f"(all_maxed={all_maxed}, all_activities_done={all_activities_done}, "
+                    f"checkin +{checkin_awarded} pts). Ghi nhận tiến độ một phần để chu kỳ sau cày tiếp."
+                )
+                save_daily_state(
+                    completed_date=today_str,
+                    partial=True,
+                    checkin_awarded=checkin_awarded,
+                )
 
             # Sổ cái thống kê điểm số & Dự báo đổi quà
             earned = max(0, end_points - start_points)
@@ -1169,21 +1179,48 @@ def is_today_already_completed() -> bool:
         return False
 
 
-def save_daily_state(completed_date: str = None):
+def save_daily_state(completed_date: str = None, partial: bool = False, checkin_awarded: int = 0):
     """
-    Ghi nhận ngày hôm nay đã hoàn thành 100% mục tiêu vào data/daily_state.json.
+    Ghi nhận trạng thái ngày hiện tại vào data/daily_state.json.
+    - partial=False: đã hoàn thành 100% mục tiêu (PC, Mobile, 4 nhiệm vụ cốt lõi: Bing Search, Daily Set, Edge Browsing, Visual Search).
+    - partial=True: ghi nhận tiến độ một phần để chu kỳ sau tiếp tục cày.
     """
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         today_str = completed_date or datetime.date.today().isoformat()
-        state = {
-            "completed_date": today_str,
-            "completed_at": datetime.datetime.now().isoformat(),
-            "status": "completed",
-        }
+        now_iso = datetime.datetime.now().isoformat()
+
+        state = {"completed_date": None, "completed_at": None, "status": "partial"}
+        if DAILY_STATE_FILE.exists():
+            try:
+                with open(DAILY_STATE_FILE, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                if existing.get("completed_date") == today_str:
+                    state = existing
+            except Exception:
+                pass
+
+        state.update({
+            "date": today_str,
+            "partial": partial,
+            "checkin_awarded": checkin_awarded,
+            "updated_at": now_iso,
+        })
+        if not partial:
+            state["completed_date"] = today_str
+            state["completed_at"] = now_iso
+            state["status"] = "completed"
+
         with open(DAILY_STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
-        _log_info(f"[Daily Lock] Đã ghi nhận hoàn tất 100% ngày hôm nay ({today_str}) vào data/daily_state.json.")
+
+        if partial:
+            _log_info(
+                f"[Daily Lock] Ghi nhận tiến độ một phần ngày {today_str} "
+                f"(checkin +{checkin_awarded} pts)."
+            )
+        else:
+            _log_info(f"[Daily Lock] Đã ghi nhận hoàn tất 100% ngày hôm nay ({today_str}) vào data/daily_state.json.")
     except Exception as e:
         _log_warning(f"[Daily Lock] Lỗi khi ghi daily_state.json: {e}")
 

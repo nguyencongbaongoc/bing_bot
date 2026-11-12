@@ -11,7 +11,7 @@ import zlib
 import struct
 from pathlib import Path
 from typing import Optional
-from playwright.sync_api import Page, BrowserContext
+from patchright.sync_api import Page, BrowserContext
 from core.humanizer import human_delay
 from core.tracker import _log_info, _log_debug, _log_warning, _log_error, _log_exception, logger
 from core.ai_solver import ask_local_ai, solve_quiz_with_ai, unload_model_from_vram
@@ -774,202 +774,11 @@ def solve_cards_in_section(context: BrowserContext, page: Page, selector: str, n
 
 def activate_mobile_app_card(page: Page) -> bool:
     """
-    Kích hoạt thẻ 'Mobile App' trên Dashboard Microsoft Rewards bằng CDP Mobile Emulation:
-    1. Kiểm tra trạng thái thẻ Mobile App hiện tại trên Desktop page. Nếu đã 1/1 [✓] thì bỏ qua.
-    2. Nếu 0/1 [✗] hoặc chưa hoàn thành:
-       - Mở một tab tạm ngay trong page.context hiện tại (không tốn thêm process trình duyệt).
-       - Dùng CDP Session ép tab này mang định danh của Bing Mobile App trên Android (BingSapphire)
-         và kích hoạt Touch / Device Metrics di động.
-       - Điều hướng tới https://rewards.bing.com/earn.
-       - Gọi claim_all_available_rewards(mob_tab) để tự động bấm các thẻ Ready to claim -> Claim points.
-       - Tìm và click vào thẻ Mobile App / Check in / Daily check-in trên mobile UI, bấm Claim points trong dialog.
-       - Đợi 3 giây cho beacon hoàn tất rồi đóng mob_tab.
+    No-op: CDP Mobile Emulation đã bị gỡ bỏ hoàn toàn.
+    Việc click nút trên giao diện web di động không thể điểm danh và gây báo hoàn thành ảo.
     """
-    _log_info("[Mobile App Card] Đang kiểm tra trạng thái thẻ Mobile App trên Dashboard...")
-    try:
-        mobile_card_selectors = [
-            'button:has-text("Mobile App")',
-            'div[role="button"]:has-text("Mobile App")',
-            'button:has-text("App Bing")',
-            'div[role="button"]:has-text("App Bing")',
-            'button:has-text("Bing App")',
-            'div[role="button"]:has-text("Bing App")',
-            'button:has-text("Bing App Streak")',
-            'section#streaks button:has-text("Mobile")',
-            'section#streaks div[role="button"]:has-text("Mobile")',
-            '[role="progressbar"][aria-label*="mobile" i]',
-            '[role="progressbar"][aria-label*="bing app" i]',
-            '[role="progressbar"][aria-label*="ứng dụng" i]',
-        ]
-
-        card = None
-        for sel in mobile_card_selectors:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible(timeout=500):
-                card = loc
-                break
-
-        is_done = False
-        if card:
-            card_text = card.inner_text(timeout=1000).replace("\n", " ")
-            has_check = card.locator('svg.size-2, svg[class*="text-fgCtrlOnImage"], .mee-icon-CheckMark, span[class*="check"]').count() > 0
-            val_now = card.get_attribute("aria-valuenow")
-            val_max = card.get_attribute("aria-valuemax")
-            val_text = (card.get_attribute("aria-valuetext") or "").strip()
-            is_bar_done = (val_max is not None and float(val_now or 0) >= float(val_max) > 0) or val_text == "100%"
-            is_done = has_check or "1/1" in card_text or "completed" in card_text.lower() or is_bar_done
-
-        if is_done:
-            _log_info("[Mobile App Card] [✓] Thẻ Mobile App đã được kích hoạt/hoàn thành trước đó (1/1).")
-            return True
-
-        _log_info("[Mobile App Card] Thẻ Mobile App đang là 0/1 [✗]. Bắt đầu kích hoạt qua CDP Mobile Emulation (BingSapphire)...")
-        
-        # 1. Mở một tab tạm ngay trong BrowserContext hiện tại
-        mob_tab = None
-        try:
-            mob_tab = page.context.new_page()
-
-            # 2. Dùng CDP Session ép tab này mang định danh Bing Mobile App trên Android (BingSapphire)
-            cdp = page.context.new_cdp_session(mob_tab)
-            cdp.send("Emulation.setUserAgentOverride", {
-                "userAgent": (
-                    "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 "
-                    "EdgA/130.0.0.0 BingSapphire/29.5.2110003554"
-                ),
-                "platform": "Linux armv8l",
-                "acceptLanguage": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
-            })
-            cdp.send("Emulation.setDeviceMetricsOverride", {
-                "width": 412,
-                "height": 915,
-                "deviceScaleFactor": 2.625,
-                "mobile": True
-            })
-            cdp.send("Emulation.setTouchEmulationEnabled", {"enabled": True})
-
-            # 3. Điều hướng tới https://rewards.bing.com/earn
-            _log_info("[Mobile App Card] Đang mở https://rewards.bing.com/earn trên tab Mobile Emulation...")
-            mob_tab.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=25000)
-            mob_tab.wait_for_timeout(random.randint(3000, 4000))
-            dismiss_popups(mob_tab)
-
-            # Tự động bấm tất cả các phần thưởng đang chờ Claim (Ready to claim -> Claim points)
-            claim_all_available_rewards(mob_tab)
-
-            # Tìm và click vào thẻ Mobile App / Check in / Daily check-in trên giao diện di động
-            mob_card_selectors = [
-                'button:has-text("Mobile App")',
-                'div[role="button"]:has-text("Mobile App")',
-                'button:has-text("App Bing")',
-                'div[role="button"]:has-text("App Bing")',
-                'button:has-text("Bing App")',
-                'div[role="button"]:has-text("Bing App")',
-                'button:has-text("Bing App Streak")',
-                'div[role="button"]:has-text("Bing App Streak")',
-                'button:has-text("Check in")',
-                'button:has-text("Check-in")',
-                'button:has-text("Daily check-in")',
-                'div[role="button"]:has-text("Daily check-in")',
-                'div[role="button"]:has-text("Check in")',
-                'div[role="button"]:has-text("Check-in")',
-                'button:has-text("Điểm danh")',
-                'div[role="button"]:has-text("Điểm danh")',
-                'section#streaks button:has-text("Mobile")',
-                'section#streaks div[role="button"]:has-text("Mobile")',
-            ]
-
-            # Cuộn nhẹ để kích hoạt lazy render các thẻ streak
-            try:
-                mob_tab.evaluate("window.scrollBy(0, 400)")
-                mob_tab.wait_for_timeout(600)
-                mob_tab.evaluate("window.scrollTo(0, 0)")
-                mob_tab.wait_for_timeout(400)
-            except Exception:
-                pass
-
-            mob_card = None
-            for m_sel in mob_card_selectors:
-                m_loc = mob_tab.locator(m_sel).first
-                if m_loc.count() > 0 and m_loc.is_visible(timeout=500):
-                    mob_card = m_loc
-                    break
-
-            if mob_card:
-                m_text = mob_card.inner_text(timeout=1000).replace("\n", " ")
-                _log_info(f"[Mobile App Card] Tìm thấy thẻ trên Mobile UI ({m_text[:50]}). Đang chạm để kích hoạt...")
-                try:
-                    mob_card.scroll_into_view_if_needed(timeout=2000)
-                    mob_card.click(timeout=3000)
-                except Exception:
-                    try:
-                        mob_card.click(force=True, timeout=2000)
-                    except Exception:
-                        mob_card.evaluate("el => el.click()")
-
-                mob_tab.wait_for_timeout(2000)
-
-                # Cuộn dialog xuống đáy nếu có
-                try:
-                    mob_tab.evaluate("""() => {
-                        const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .overflow-auto, .scrollbar-panel, div.fixed.inset-0');
-                        dialogs.forEach(d => { d.scrollTop = d.scrollHeight; });
-                    }""")
-                    mob_tab.wait_for_timeout(500)
-                except Exception:
-                    pass
-
-                # Bấm nút Claim points / Claim bên trong dialog nếu xuất hiện
-                claim_selectors = [
-                    'div.fixed.inset-0 button:has-text("Claim points")',
-                    '[role="dialog"] button:has-text("Claim points")',
-                    'button:has-text("Claim points")',
-                    'span:text-is("Claim points")',
-                    '[role="dialog"] button:has-text("Claim")',
-                    'button:has-text("Claim")',
-                    'button:has-text("Check-in now")',
-                    'a:has-text("Check-in now")',
-                    'button:has-text("Nhận điểm")',
-                    'button:has-text("Điểm danh")',
-                ]
-                for c_sel in claim_selectors:
-                    c_btn = mob_tab.locator(c_sel).first
-                    if c_btn.count() > 0 and c_btn.is_visible(timeout=1500):
-                        try:
-                            c_btn.click(force=True, timeout=2000)
-                            _log_info(f"[Mobile App Card] [✓] Đã bấm nút claim trong dialog di động: {c_sel}")
-                            mob_tab.wait_for_timeout(2000)
-                            break
-                        except Exception:
-                            pass
-
-                # Quét claim lần nữa cho các thẻ vừa mở khóa
-                claim_all_available_rewards(mob_tab)
-
-            # Đợi 3 giây cho beacon hoàn tất
-            _log_info("[Mobile App Card] Đợi 3 giây cho beacon gửi về máy chủ...")
-            mob_tab.wait_for_timeout(3000)
-            _log_info("[Mobile App Card] [✓] Hoàn thành quy trình Mobile Emulation Check-in.")
-            return True
-
-        except Exception as me:
-            _log_warning(f"[Mobile App Card] Lỗi trong quá trình CDP Mobile Emulation: {me}")
-            return False
-        finally:
-            if mob_tab:
-                try:
-                    mob_tab.close()
-                except Exception:
-                    pass
-
-    except Exception as e:
-        _log_warning(f"[Mobile App Card] Lỗi khi kích hoạt thẻ Mobile App: {e}")
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return False
+    _log_info("[Mobile App Card] CDP Mobile Emulation đã bị gỡ bỏ - bỏ qua kích hoạt thẻ Mobile App.")
+    return False
 
 
 def run_all_dashboard_activities(context: BrowserContext, page: Page) -> None:
@@ -1002,8 +811,8 @@ def run_all_dashboard_activities(context: BrowserContext, page: Page) -> None:
         "Daily Set"
     )
 
-    # 3. Kích hoạt thẻ 'Mobile App' trên Dashboard
-    activate_mobile_app_card(page)
+    # 3. Mobile App card: CDP Mobile Emulation removed - handled by API check-in (type 103)
+    pass
 
     # 4. More Activities (Sự kiện và hoạt động bổ sung)
     more_count = solve_cards_in_section(
@@ -2821,14 +2630,15 @@ def get_daily_search_progress(page: Page) -> dict:
             len(all_act) == 5 and
             all(a.get("done", False) for a in all_act.values())
         )
-        progress["all_activities_done"] = all_five_done
-
+        # CHỈ coi all_activities_done là True khi 4 nhiệm vụ cốt lõi (Bing Search, Daily Set, Edge Browsing, Visual Search) đạt 100%
+        # Loại trừ thẻ Mobile App trên Dashboard web vì điểm danh Mobile App được xử lý qua API (type 103)
         primary_four_done = (
             all_act.get('Bing Search', {}).get('done', False) and
             all_act.get('Daily Set', {}).get('done', False) and
             all_act.get('Edge Browsing', {}).get('done', False) and
             all_act.get('Visual Search', {}).get('done', False)
         )
+        progress["all_activities_done"] = primary_four_done
         progress["primary_four_done"] = primary_four_done
         progress["mobile_app_done"] = all_act.get("Mobile App", {}).get("done", False)
 
@@ -2838,7 +2648,9 @@ def get_daily_search_progress(page: Page) -> dict:
 
         if not progress["all_activities_done"]:
             uncompleted = [k for k, v in all_act.items() if not v.get("done", False)]
-            logger.info(f"[Dashboard] Còn {len(uncompleted)} thẻ chưa hoàn thành: {', '.join(uncompleted)} -> all_activities_done = False")
+            # Filter out Mobile App as it's not a required activity for daily lock
+            uncompleted_required = [k for k in uncompleted if k != "Mobile App"]
+            logger.info(f"[Dashboard] Còn {len(uncompleted_required)} thẻ cốt lõi chưa hoàn thành: {', '.join(uncompleted_required)} -> all_activities_done = False")
 
         # Bước B: Mở drawer/popup Points breakdown để trích xuất dữ liệu thực tế
         body_text = page.inner_text("body")
@@ -2950,7 +2762,7 @@ def get_daily_search_progress(page: Page) -> dict:
 
 if __name__ == "__main__":
     # Test nhanh (cần profile đã đăng nhập)
-    from playwright.sync_api import sync_playwright
+    from patchright.sync_api import sync_playwright
     from pathlib import Path
     
     PROFILE_DIR = Path(__file__).resolve().parent.parent / "profiles" / "desktop"

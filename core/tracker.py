@@ -11,7 +11,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from playwright.sync_api import Page
+from patchright.sync_api import Page
 
 # Use PYTHONUTF8=1 environment variable instead of manual wrapping
 # This avoids issues with stream wrapping in subprocesses

@@ -10,7 +10,7 @@ Tối ưu hóa hành vi tìm kiếm tự nhiên (Organic Search Engine) nhằm t
 import math
 import random
 import time
-from playwright.sync_api import Page
+from patchright.sync_api import Page
 from core.logger import logger
 from core.trends import save_searched_keyword
 

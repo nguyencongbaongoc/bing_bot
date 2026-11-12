@@ -103,11 +103,11 @@ try {
     if (-not $?) { throw "Failed to install requirements" }
     Write-Success "Dependencies installed"
 
-    # 5. Install Playwright Edge
-    Write-Step "Installing Playwright Microsoft Edge..."
-    & $venvPython -m playwright install msedge
-    if (-not $?) { throw "Failed to install Playwright Edge" }
-    Write-Success "Playwright Edge ready"
+    # 5. Install Patchright Chromium driver
+    Write-Step "Installing Patchright Chromium driver..."
+    & $venvPython -m patchright install chromium
+    if (-not $?) { throw "Failed to install Patchright Chromium" }
+    Write-Success "Patchright Chromium ready"
 
     # 6. Create directories
     Write-Step "Creating required directories..."

@@ -115,7 +115,7 @@ Kịch bản tự động sẽ thực hiện toàn bộ:
 1. Kiểm tra Python trên hệ thống.
 2. Khởi tạo môi trường ảo `.venv`.
 3. Nâng cấp `pip` và cài đặt dependencies từ `requirements.txt`.
-4. Cài đặt driver trình duyệt Playwright Edge (`playwright install msedge`).
+4. Cài đặt driver trình duyệt Patchright Edge (`patchright install chromium`).
 5. Khởi tạo sẵn các thư mục `logs/`, `profiles/desktop`, `profiles/mobile`.
 6. Khởi chạy giao diện `setup_login.py` để bạn đăng nhập tài khoản Microsoft.
 7. Đăng ký Windows Task Scheduler để tự động chạy ngầm mỗi ngày.
@@ -138,7 +138,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # Cài đặt browser binary cho Microsoft Edge
-playwright install msedge
+patchright install chromium
 ```
 
 ---

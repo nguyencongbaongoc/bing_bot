@@ -8,7 +8,7 @@ Chạy một lần duy nhất, sau đó session được lưu trong profiles/des
 import sys
 import argparse
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 # Use PYTHONUTF8=1 environment variable instead of manual wrapping
 # This avoids issues with stream wrapping in subprocesses
