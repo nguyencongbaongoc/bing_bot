@@ -57,8 +57,10 @@ DEBUG_DAPI_FILE = DATA_DIR / "debug_dapi_me.json"
 
 
 def get_mobile_access_token(account_id: str = "acc_primary", page: Optional[Page] = None) -> Optional[str]:
-    if oauth_cache:
-        refresh_token = oauth_cache.get("refresh_token")
+    # 1. Try to use cached/refresh tokens from database
+    oauth = get_oauth_tokens(account_id)
+    if oauth:
+        refresh_token = oauth.get("refresh_token")
         if refresh_token:
             _log_debug("[Mobile OAuth] Thử làm mới token từ refresh_token...")
             refresh_data = {
@@ -282,7 +284,7 @@ def _extract_checkin_day(promotions, promotion_id: str) -> int:
     return 1
 
 
-def _get_checkin_promotion(access_token: str, country: str = "vn") -> dict:
+def _get_checkin_promotion(access_token: str, country: str = "vn", account_id: str = "acc_primary") -> dict:
     headers = _build_sapphire_headers(access_token, country)
     # Primary DAPI endpoint with options=613 as per protocol
     endpoints = (
@@ -402,7 +404,7 @@ def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "
     # 3.2 Bóc tách promotion động (promotion_id, current_day, attributes)
     promotion = {}
     try:
-        promotion = _get_checkin_promotion(access_token, country)
+        promotion = _get_checkin_promotion(access_token, country, account_id)
         if promotion.get("promotion_id"):
             logger.info(
                 f"[App Check-in] Trích xuất nhiệm vụ động: promotion_id={promotion['promotion_id']}, "
