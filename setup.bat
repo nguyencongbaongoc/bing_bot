@@ -9,4 +9,8 @@ if %errorlevel% neq 0 (
     pause
     exit /b %errorlevel%
 )
+echo.
+echo [OK] Setup complete! You can now run the bot with:
+echo        run.bat           (Windows)
+echo        run.command       (macOS/Linux)
 pause
