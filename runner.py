@@ -2,6 +2,7 @@
 """
 Unified Orchestrator - Phase 5 Full Automation Pipeline.
 Quản lý toàn bộ quy trình: Check-in/Activities -> Search Loop (Desktop+Mobile Cooldown) -> Logging.
+Phase 7.2: Multi-account support with SQLite WAL database.
 """
 
 import argparse
@@ -84,12 +85,30 @@ from core.tracker import (
     _log_error,
     _log_exception,
 )
+from core.database import (
+    init_db,
+    get_db_path,
+    upsert_account,
+    get_account,
+    is_day_completed,
+    upsert_daily_progress,
+    record_points_snapshot,
+    get_oauth_tokens,
+    save_oauth_tokens,
+    get_recent_search_queries,
+    add_search_queries,
+    insert_run_log,
+)
 
 # ==================== CONFIGURATION ====================
+ROOT_DIR = Path(__file__).resolve().parent
+DATA_DIR = ROOT_DIR / "data"
+DAILY_STATE_FILE = DATA_DIR / "daily_state.json"
+DESKTOP_PROFILE = ROOT_DIR / "profiles" / "desktop"
+MOBILE_PROFILE = ROOT_DIR / "profiles" / "mobile"
 REWARDS_URL = "https://rewards.bing.com"
 BING_URL = "https://www.bing.com"
 
-ACCOUNT_ID = "acc_primary"
 DEFAULT_TIMEOUT = 8000  # 8 seconds default timeout
 
 # Tham số khởi động trình duyệt tối ưu phần cứng & ngụy trang chống phát hiện:
@@ -107,6 +126,20 @@ BROWSER_ARGS = [
     "--media-cache-size=10485760",        # Giới hạn media cache 10 MB
     "--disable-application-cache",
 ]
+
+
+def _get_profile_paths(account_id: str) -> tuple[Path, Path]:
+    """Get desktop and mobile profile paths for an account, with fallback to legacy defaults."""
+    account = get_account(account_id)
+    if account and account.get("profile_dir"):
+        base = ROOT_DIR / account["profile_dir"]
+        # If profile_dir already ends with 'desktop', it's the legacy path structure
+        # Otherwise, treat it as the base directory for the account
+        if base.name == "desktop":
+            return base, base.parent / "mobile"
+        return base / "desktop", base / "mobile"
+    # Fallback for acc_primary using legacy paths
+    return ROOT_DIR / "profiles" / "desktop", ROOT_DIR / "profiles" / "mobile"
 
 
 def get_sync_playwright():
@@ -274,6 +307,9 @@ def apply_stealth_scripts(context, is_mobile: bool = False, cpu_threads: int = N
 
 def create_desktop_context(playwright, headless: bool, account_id: str = "acc_primary"):
     """Tạo Desktop persistent context với chế độ ngụy trang (Stealth)."""
+    desktop_profile, _ = _get_profile_paths(account_id)
+    desktop_profile.mkdir(parents=True, exist_ok=True)
+    
     args = list(BROWSER_ARGS)
     if headless:
         args.append("--headless=new")
@@ -285,30 +321,25 @@ def create_desktop_context(playwright, headless: bool, account_id: str = "acc_pr
         "Sec-CH-UA-Mobile": "?0",
     }
 
-    # Dynamic Edge discovery - fallback to bundled Chromium if not found
-    edge_path = get_edge_executable_path()
-    launch_kwargs = {
-        "user_data_dir": str(DESKTOP_PROFILE),
-        "headless": headless,
-        "args": args,
-        "no_viewport": not headless,
-        "locale": "vi-VN",
-        "timezone_id": "Asia/Ho_Chi_Minh",
-        "extra_http_headers": extra_headers,
-    }
-    
-    if edge_path:
-        launch_kwargs["executable_path"] = edge_path
-    else:
-        launch_kwargs["channel"] = "msedge"
-    
-    context = playwright.chromium.launch_persistent_context(**launch_kwargs)
+    context = playwright.chromium.launch_persistent_context(
+        user_data_dir=str(DESKTOP_PROFILE),
+        channel="msedge",
+        headless=headless,
+        args=args,
+        no_viewport=not headless,
+        locale="vi-VN",
+        timezone_id="Asia/Ho_Chi_Minh",
+        extra_http_headers=extra_headers,
+    )
     apply_stealth_scripts(context, is_mobile=False, account_id=account_id)
     return context
 
 
 def create_mobile_context(playwright, headless: bool, account_id: str = "acc_primary"):
     """Tạo Mobile emulation persistent context giả lập Android (Pixel 7)."""
+    _, mobile_profile = _get_profile_paths(account_id)
+    mobile_profile.mkdir(parents=True, exist_ok=True)
+    
     mobile_device = dict(playwright.devices["Pixel 7"])
     mobile_device.pop("default_browser_type", None)
 
@@ -328,29 +359,20 @@ def create_mobile_context(playwright, headless: bool, account_id: str = "acc_pri
         "Sec-CH-UA-Model": '"Pixel 7"',
     }
 
-    # Dynamic Edge discovery - fallback to bundled Chromium if not found
-    edge_path = get_edge_executable_path()
-    launch_kwargs = {
-        "user_data_dir": str(MOBILE_PROFILE),
-        "headless": headless,
-        "args": args,
-        "locale": "vi-VN",
-        "timezone_id": "Asia/Ho_Chi_Minh",
-        "extra_http_headers": extra_headers,
+    context = playwright.chromium.launch_persistent_context(
+        user_data_dir=str(MOBILE_PROFILE),
+        channel="msedge",
+        headless=headless,
+        args=args,
         **mobile_device,
-    }
-    
-    if edge_path:
-        launch_kwargs["executable_path"] = edge_path
-    else:
-        launch_kwargs["channel"] = "msedge"
-    
-    context = playwright.chromium.launch_persistent_context(**launch_kwargs)
+        locale="vi-VN",
+        timezone_id="Asia/Ho_Chi_Minh",
+        extra_http_headers=extra_headers,
+    )
     apply_stealth_scripts(context, is_mobile=True, account_id=account_id)
     return context
 
-
-def ensure_desktop_page(d_context, playwright_instance, headless: bool):
+def ensure_desktop_page(d_context, playwright_instance, headless: bool, account_id: str = "acc_primary"):
     """
     Đảm bảo luôn lấy được một d_page hợp lệ.
     Nếu d_context bị đóng hoặc mất kết nối sau 15 phút cooldown, tự động hồi sinh context mới.
@@ -363,6 +385,7 @@ def ensure_desktop_page(d_context, playwright_instance, headless: bool):
                 if not page.is_closed():
                     page.set_default_timeout(DEFAULT_TIMEOUT)
                     return d_context, page
+
             new_page = d_context.new_page()
             new_page.set_default_timeout(DEFAULT_TIMEOUT)
             return d_context, new_page
@@ -376,7 +399,7 @@ def ensure_desktop_page(d_context, playwright_instance, headless: bool):
 
     # Khởi tạo lại Desktop context sạch sẽ
     try:
-        new_context = create_desktop_context(playwright_instance, headless, account_id=ACCOUNT_ID)
+        new_context = create_desktop_context(playwright_instance, headless, account_id=account_id)
         new_page = new_context.pages[0] if new_context.pages else new_context.new_page()
         new_page.set_default_timeout(DEFAULT_TIMEOUT)
         return new_context, new_page
@@ -385,7 +408,7 @@ def ensure_desktop_page(d_context, playwright_instance, headless: bool):
         raise err
 
 
-def ensure_mobile_page(m_context, playwright_instance, headless: bool):
+def ensure_mobile_page(m_context, playwright_instance, headless: bool, account_id: str = "acc_primary"):
     """
     Đảm bảo luôn lấy được một m_page hợp lệ cho di động.
     Nếu m_context bị đóng hoặc mất kết nối sau Cooldown, tự động hồi sinh context mới.
@@ -411,7 +434,7 @@ def ensure_mobile_page(m_context, playwright_instance, headless: bool):
 
     # Khởi tạo lại Mobile context sạch sẽ
     try:
-        new_context = create_mobile_context(playwright_instance, headless, account_id=ACCOUNT_ID)
+        new_context = create_mobile_context(playwright_instance, headless, account_id=account_id)
         new_page = new_context.pages[0] if new_context.pages else new_context.new_page()
         new_page.set_default_timeout(DEFAULT_TIMEOUT)
         return new_context, new_page
@@ -423,10 +446,12 @@ def ensure_mobile_page(m_context, playwright_instance, headless: bool):
 # ==================== MAIN ORCHESTRATOR ====================
 def run_full_pipeline(
     args=None,
+    account_id: str = "acc_primary",
     desktop_target: int = 30,
     mobile_target: int = 20,
     batch_size: int = 3,
     headless: bool = True,
+    suppress_auto_sleep: bool = False,
 ) -> bool:
     """
     Pipeline hoàn chỉnh Phase 5:
@@ -446,6 +471,15 @@ def run_full_pipeline(
             batch_size = args.batch_size
         if hasattr(args, "debug"):
             headless = not args.debug
+        if hasattr(args, "account_id"):
+            account_id = args.account_id
+
+    # Initialize database
+    init_db()
+    
+    # Ensure account exists in database
+    desktop_profile, mobile_profile = _get_profile_paths(account_id)
+    upsert_account(account_id, profile_dir=str(desktop_profile.parent.relative_to(ROOT_DIR)))
 
     # Kiểm tra cờ chạy tự động vs tùy biến
     is_debug = bool(args and getattr(args, "debug", False))
@@ -455,9 +489,11 @@ def run_full_pipeline(
         any(arg.startswith("--desktop-target") or arg.startswith("--mobile-target") for arg in sys.argv)
     ))
 
+    today_str = datetime.date.today().isoformat()
+    
     # Zero-Browser Daily Lock: Nếu chạy tự động không debug/custom target và hôm nay đã hoàn thành 100%
-    if not is_debug and not has_custom_target and is_today_already_completed():
-        _log_info("[Daily Lock] Hôm nay đã hoàn thành 100% mục tiêu điểm. Thoát sớm để bảo vệ SSD & tài khoản!")
+    if not is_debug and not has_custom_target and is_day_completed(account_id, today_str):
+        _log_info(f"[Daily Lock] Hôm nay đã hoàn thành 100% mục tiêu điểm cho {account_id}. Thoát sớm!")
         return True
 
     try:
@@ -468,6 +504,7 @@ def run_full_pipeline(
     _log_info("=" * 60)
     _log_info("  Microsoft Rewards Bot - Phase 5 Full Automation")
     _log_info("=" * 60)
+    _log_info(f"Account: {account_id}")
     _log_info(f"Config: Desktop={desktop_target}, Mobile={mobile_target}, Batch={batch_size}")
     _log_info(f"Headless: {headless}")
     _log_info("")
@@ -479,20 +516,22 @@ def run_full_pipeline(
         time.sleep(jitter_seconds)
 
     # Kiểm tra profile tồn tại
-    if not DESKTOP_PROFILE.exists():
-        _log_error(f"Desktop profile không tồn tại: {DESKTOP_PROFILE}")
+    desktop_profile, mobile_profile = _get_profile_paths(account_id)
+    if not desktop_profile.exists():
+        _log_error(f"Desktop profile không tồn tại: {desktop_profile}")
         _log_info("   Chạy: python setup_login.py --desktop")
         return False
     
-    if not MOBILE_PROFILE.exists():
-        _log_error(f"Mobile profile không tồn tại: {MOBILE_PROFILE}")
+    if not mobile_profile.exists():
+        _log_error(f"Mobile profile không tồn tại: {mobile_profile}")
         _log_info("   Chạy: python setup_login.py --mobile")
         return False
 
-    # Chuẩn bị danh sách từ khóa độc nhất (lọc qua data/searched_history.json & đa dạng đời sống)
+    # Chuẩn bị danh sách từ khóa độc nhất (lọc qua database search_history & đa dạng đời sống)
     total_needed = desktop_target + mobile_target + 6
-    _log_info(f"Đang chuẩn bị {total_needed} từ khóa độc nhất (lọc trùng qua lịch sử 200 câu gần nhất)...")
-    queries = get_unique_search_queries(target_count=total_needed, geo="VN")
+    _log_info(f"Đang chuẩn bị {total_needed} từ khóa độc nhất (lọc trùng qua lịch sử {account_id})...")
+    recent_searches = get_recent_search_queries(account_id, limit=200)
+    queries = get_unique_search_queries(target_count=total_needed, geo="VN", account_id=account_id, exclude_queries=recent_searches)
     random.shuffle(queries)  # Xáo trộn để không theo thứ tự cố định
     
     _log_info(f"Đã chuẩn bị {len(queries)} từ khóa độc nhất không trùng lặp.")
@@ -525,7 +564,7 @@ def run_full_pipeline(
             # ========================================================
             _log_info("[1/3] Khởi chạy Desktop Context để xử lý Activities & Streak...")
             try:
-                d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                d_context, d_page = ensure_desktop_page(d_context, p, headless, account_id)
 
                 # Đọc điểm số khởi đầu
                 d_page.goto(REWARDS_URL, wait_until="domcontentloaded")
@@ -559,7 +598,7 @@ def run_full_pipeline(
                     init_act.get("Visual Search", {}).get("done", False)
                 )
                 init_mob_done = init_act.get("Mobile App", {}).get("done", False)
-                if not all_activities_done and all_maxed and init_primary_four and not init_mob_done and is_today_already_completed():
+                if not all_activities_done and all_maxed and init_primary_four and not init_mob_done and is_day_completed(account_id, today_str):
                     all_activities_done = True
                     initial_progress["all_activities_done"] = True
                 is_explicit_test = bool(args and getattr(args, "desktop_target", None) == 0 and getattr(args, "mobile_target", None) == 0)
@@ -594,7 +633,7 @@ def run_full_pipeline(
 
                     # Điểm danh 7 ngày trên App Bing bằng OAuth API (type: 103)
                     try:
-                        checkin_awarded = solve_mobile_app_daily_checkin(d_page)
+                        checkin_awarded = solve_mobile_app_daily_checkin(d_page, account_id=account_id)
                         sleep_time = random.uniform(2.0, 4.0)
                         _log_debug(f"[App Check-in] Nghỉ {sleep_time:.1f}s sau khi gọi API check-in...")
                         time.sleep(sleep_time)
@@ -603,13 +642,13 @@ def run_full_pipeline(
 
                     # Quét App Promotions (GET /dapi/me) để thu thập điểm ẩn
                     try:
-                        solve_mobile_app_promotions(d_page)
+                        solve_mobile_app_promotions(d_page, account_id=account_id)
                     except Exception as e:
                         _log_warning(f"Lỗi khi quét Mobile App Promotions: {e}")
 
                     # Thực hiện nhiệm vụ Read to Earn qua Mobile App API (+30 điểm/ngày)
                     try:
-                        solve_mobile_app_read_to_earn(d_page)
+                        solve_mobile_app_read_to_earn(d_page, account_id=account_id)
                     except Exception as e:
                         _log_warning(f"Lỗi khi xử lý Mobile Read to Earn: {e}")
 
@@ -756,7 +795,7 @@ def run_full_pipeline(
                 d_page = None
                 try:
                     # Mở sẵn Desktop Context cho chu trình tìm kiếm & Edge Browsing Cooldown
-                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                    d_context, d_page = ensure_desktop_page(d_context, p, headless, account_id)
 
                     max_double_check_retries = 3
                     double_check_attempt = 0
@@ -768,7 +807,7 @@ def run_full_pipeline(
                             mob_searched_round = 0
 
                             # Đảm bảo d_page vẫn hoạt động
-                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless, account_id)
 
                             # ---- 2.1 DESKTOP BATCH ----
                             if d_done < desktop_target:
@@ -777,13 +816,13 @@ def run_full_pipeline(
                                 batch_limit = min(current_d_batch, desktop_target - d_done)
                                 for i in range(batch_limit):
                                     if queries_idx >= len(queries):
-                                        more_q = get_unique_search_queries(target_count=10, geo="VN")
+                                        more_q = get_unique_search_queries(target_count=10, geo="VN", account_id=account_id)
                                         queries.extend(more_q)
                                     q = queries[queries_idx]
                                     queries_idx += 1
 
                                     # Đảm bảo d_page vẫn hoạt động trước mỗi câu tìm kiếm PC
-                                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                                    d_context, d_page = ensure_desktop_page(d_context, p, headless, account_id)
 
                                     _log_info(f"[PC Search {d_done + 1}/{desktop_target}] {q[:50]}...")
 
@@ -793,7 +832,7 @@ def run_full_pipeline(
                                         d_done += 1
                                         batch_completed += 1
                                         pc_searched_round += 1
-                                        save_searched_keyword(q)
+                                        add_search_queries(account_id, [q], platform=search_type)
                                         # Update session after each successful search
                                         current_points = extract_current_points(d_page)
                                         update_session(d_done + m_done, current_points, f"Desktop search {d_done}/{desktop_target}")
@@ -831,27 +870,27 @@ def run_full_pipeline(
                             # ---- 2.2 MOBILE BATCH ----
                             if m_done < mobile_target:
                                 try:
-                                    m_context, m_page = ensure_mobile_page(m_context, p, headless)
+                                    m_context, m_page = ensure_mobile_page(m_context, p, headless, account_id)
 
                                     # Biến thiên kích thước batch tự nhiên 2-4 câu
                                     current_m_batch = random.randint(2, 4) if (args is None or getattr(args, "batch_size", 3) == 3) else batch_size
                                     batch_limit = min(current_m_batch, mobile_target - m_done)
                                     for i in range(batch_limit):
                                         if queries_idx >= len(queries):
-                                            more_q = get_unique_search_queries(target_count=10, geo="VN")
+                                            more_q = get_unique_search_queries(target_count=10, geo="VN", account_id=account_id)
                                             queries.extend(more_q)
                                         q = queries[queries_idx]
                                         queries_idx += 1
 
                                         # Đảm bảo m_page vẫn hoạt động trước mỗi câu tìm kiếm Mobile
-                                        m_context, m_page = ensure_mobile_page(m_context, p, headless)
+                                        m_context, m_page = ensure_mobile_page(m_context, p, headless, account_id)
 
                                         _log_info(f"[Mobile Search {m_done + 1}/{mobile_target}] {q[:50]}...")
                                         if execute_single_search(m_page, q, device_type="mobile"):
                                             m_done += 1
                                             batch_completed += 1
                                             mob_searched_round += 1
-                                            save_searched_keyword(q)
+                                            add_search_queries(account_id, [q], platform="mobile")
                                             # Update session after each successful search
                                             current_points = extract_current_points(m_page)
                                             update_session(d_done + m_done, current_points, f"Mobile search {m_done}/{mobile_target}")
@@ -902,7 +941,7 @@ def run_full_pipeline(
 
                                 # Đảm bảo d_page sẵn sàng trước khi vào cooldown
                                 try:
-                                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                                    d_context, d_page = ensure_desktop_page(d_context, p, headless, account_id)
                                 except Exception as e:
                                     _log_warning(f"[Runner] Lỗi chuẩn bị Desktop page trước cooldown: {e}")
 
@@ -924,7 +963,7 @@ def run_full_pipeline(
                         _log_info("[Double-Check] Ép chuyển hướng/reload lại Dashboard (rewards.bing.com/earn)...")
 
                         try:
-                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless, account_id)
                         except Exception as e:
                             _log_warning(f"[Double-Check] Lỗi chuẩn bị Desktop page: {e}")
 
@@ -1010,7 +1049,7 @@ def run_full_pipeline(
                 _log_info(f"Điểm số kết thúc: {end_points:,}")
             else:
                 try:
-                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                    d_context, d_page = ensure_desktop_page(d_context, p, headless, account_id)
                     d_page.goto(REWARDS_URL, wait_until="domcontentloaded")
                     dismiss_popups(d_page)
                     
@@ -1044,11 +1083,13 @@ def run_full_pipeline(
             today_str = datetime.date.today().isoformat()
             can_lock_day = all_maxed and all_activities_done
             if can_lock_day:
-                _log_info("[Daily Lock] Đã hoàn thành 100% mục tiêu. Ghi nhận khóa ngày vào daily_state.json.")
-                save_daily_state(
-                    completed_date=today_str,
-                    partial=False,
+                _log_info("[Daily Lock] Đã hoàn thành 100% mục tiêu. Ghi nhận khóa ngày vào database.")
+                upsert_daily_progress(
+                    account_id=account_id,
+                    date_str=today_str,
+                    status="completed",
                     checkin_awarded=checkin_awarded,
+                    completed_at=datetime.datetime.now().isoformat()
                 )
             else:
                 _log_info(
@@ -1056,16 +1097,26 @@ def run_full_pipeline(
                     f"(all_maxed={all_maxed}, all_activities_done={all_activities_done}, "
                     f"checkin +{checkin_awarded} pts). Ghi nhận tiến độ một phần để chu kỳ sau cày tiếp."
                 )
-                save_daily_state(
-                    completed_date=today_str,
-                    partial=True,
-                    checkin_awarded=checkin_awarded,
+                upsert_daily_progress(
+                    account_id=account_id,
+                    date_str=today_str,
+                    status="partial",
+                    checkin_awarded=checkin_awarded
                 )
 
             # Sổ cái thống kê điểm số & Dự báo đổi quà
             earned = max(0, end_points - start_points)
             try:
-                update_points_ledger(total_points=end_points, earned_today=earned, bing_star_bonus=bing_star_bonus_str)
+                record_points_snapshot(
+                    account_id=account_id,
+                    date_str=today_str,
+                    start_points=start_points,
+                    end_points=end_points,
+                    earned_points=earned,
+                    bing_star_pts=0,  # parsed from bing_star_bonus_str if needed
+                    desktop_searches=d_done,
+                    mobile_searches=m_done
+                )
             except Exception as e:
                 _log_warning(f"Lỗi khi cập nhật points_ledger: {e}")
 
@@ -1491,6 +1542,18 @@ Ví dụ sử dụng:
         help="Vô hiệu hóa tính năng tự động Sleep khi hoàn tất."
     )
     parser.add_argument(
+        "--account-id",
+        type=str,
+        default="acc_primary",
+        help="ID tài khoản để chạy (mặc định: acc_primary)"
+    )
+    parser.add_argument(
+        "--suppress-auto-sleep",
+        action="store_true",
+        default=False,
+        help="Ngăn tự động Sleep giữa các tài khoản (dùng cho multi-account orchestrator)"
+    )
+    parser.add_argument(
         "--retry-count",
         type=int,
         default=0,
@@ -1510,7 +1573,11 @@ Ví dụ sử dụng:
             logger.info("============================================================")
             
             # Thực thi toàn bộ pipeline
-            all_completed = run_full_pipeline(args)
+            all_completed = run_full_pipeline(
+                args,
+                account_id=args.account_id,
+                suppress_auto_sleep=args.suppress_auto_sleep
+            )
 
             # Nếu không bật cờ --daemon, chạy xong 1 phiên thì thoát như cũ
             if not args.daemon:
@@ -1549,7 +1616,7 @@ Ví dụ sử dụng:
             pass
         sys.exit(0)
 
-    if all_completed and getattr(args, "auto_sleep", False):
+    if all_completed and getattr(args, "auto_sleep", False) and not getattr(args, "suppress_auto_sleep", False):
         if is_user_active(threshold_seconds=120):
             logger.info("[Auto-Sleep] Phát hiện người dùng đang sử dụng máy tính. Hủy lệnh Sleep để không làm gián đoạn công việc!")
         else:

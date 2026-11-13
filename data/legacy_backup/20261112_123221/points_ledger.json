@@ -1,0 +1,88 @@
+{
+  "last_updated": "2026-11-12T11:44:49.629673",
+  "history": [
+    {
+      "date": "2026-10-29",
+      "total_points": 1332,
+      "earned_today": 6,
+      "updated_at": "2026-10-29T22:53:15.729011"
+    },
+    {
+      "date": "2026-10-30",
+      "total_points": 1577,
+      "earned_today": 21,
+      "updated_at": "2026-10-30T04:47:09.955889"
+    },
+    {
+      "date": "2026-10-31",
+      "total_points": 1987,
+      "earned_today": 6,
+      "updated_at": "2026-10-31T22:02:48.878843"
+    },
+    {
+      "date": "2026-11-01",
+      "total_points": 2419,
+      "earned_today": 45,
+      "updated_at": "2026-11-01T08:28:29.694883"
+    },
+    {
+      "date": "2026-11-02",
+      "total_points": 3208,
+      "earned_today": 198,
+      "updated_at": "2026-11-02T19:04:51.726727",
+      "bing_star_bonus": "3 / 2.100"
+    },
+    {
+      "date": "2026-11-03",
+      "total_points": 3433,
+      "earned_today": 27,
+      "bing_star_bonus": "0 / 2,100",
+      "updated_at": "2026-11-03T16:56:54.718105"
+    },
+    {
+      "date": "2026-11-04",
+      "total_points": 3662,
+      "earned_today": 0,
+      "bing_star_bonus": "0 / 2,100",
+      "updated_at": "2026-11-04T16:10:24.493620"
+    },
+    {
+      "date": "2026-11-05",
+      "total_points": 3993,
+      "earned_today": 0,
+      "bing_star_bonus": "0 / 2,100",
+      "updated_at": "2026-11-05T20:11:06.604027"
+    },
+    {
+      "date": "2026-11-07",
+      "total_points": 4480,
+      "earned_today": 4480,
+      "bing_star_bonus": "3 / 2.100",
+      "updated_at": "2026-11-07T20:09:06.755038"
+    },
+    {
+      "date": "2026-11-08",
+      "total_points": 4769,
+      "earned_today": 0,
+      "bing_star_bonus": "0 / 2,100",
+      "updated_at": "2026-11-08T06:03:19.329772"
+    },
+    {
+      "date": "2026-11-11",
+      "total_points": 5828,
+      "earned_today": 0,
+      "bing_star_bonus": "3 / 2.100",
+      "updated_at": "2026-11-11T22:45:34.550535"
+    },
+    {
+      "date": "2026-11-12",
+      "total_points": 6062,
+      "earned_today": 0,
+      "bing_star_bonus": "0 / 2,100",
+      "updated_at": "2026-11-12T11:44:49.629673"
+    }
+  ],
+  "total_points": 6062,
+  "earned_today": 0,
+  "bing_star_bonus": "0 / 2,100"
+}

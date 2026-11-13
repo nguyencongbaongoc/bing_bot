@@ -12,6 +12,8 @@ from patchright.sync_api import sync_playwright
 
 from core.paths import MOBILE_PROFILE, get_edge_executable_path
 
+ROOT_DIR = Path(__file__).resolve().parent
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 

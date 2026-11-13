@@ -1,0 +1,571 @@
+{
+  "communities": {
+    "0": [
+      "browsercontext",
+      "core_activities",
+      "core_activities_activate_mobile_app_card",
+      "core_activities_claim_all_available_rewards",
+      "core_activities_claim_msn_daily_gaming_tile",
+      "core_activities_detect_unusual_activity_warning",
+      "core_activities_dismiss_popups",
+      "core_activities_ensure_streak_protection",
+      "core_activities_extract_bing_star_bonus",
+      "core_activities_get_daily_search_progress",
+      "core_activities_get_random_screenshot_path",
+      "core_activities_handle_visual_search_streak",
+      "core_activities_handle_visual_search_streak_is_valid_result_url",
+      "core_activities_interact_with_copilot",
+      "core_activities_py_page",
+      "core_activities_rationale_1",
+      "core_activities_rationale_1116",
+      "core_activities_rationale_1121",
+      "core_activities_rationale_1359",
+      "core_activities_rationale_150",
+      "core_activities_rationale_1686",
+      "core_activities_rationale_1726",
+      "core_activities_rationale_1767",
+      "core_activities_rationale_1810",
+      "core_activities_rationale_1851",
+      "core_activities_rationale_1931",
+      "core_activities_rationale_1981",
+      "core_activities_rationale_2391",
+      "core_activities_rationale_2488",
+      "core_activities_rationale_303",
+      "core_activities_rationale_348",
+      "core_activities_rationale_35",
+      "core_activities_rationale_450",
+      "core_activities_rationale_514",
+      "core_activities_rationale_554",
+      "core_activities_rationale_605",
+      "core_activities_rationale_64",
+      "core_activities_rationale_776",
+      "core_activities_rationale_785",
+      "core_activities_rationale_842",
+      "core_activities_rationale_877",
+      "core_activities_read_visual_search_streak_status",
+      "core_activities_run_all_dashboard_activities",
+      "core_activities_run_read_to_earn",
+      "core_activities_solve_all_earn_quests",
+      "core_activities_solve_cards_in_section",
+      "core_activities_solve_checkin",
+      "core_activities_solve_interactive_tab",
+      "core_activities_solve_keep_earning_activities",
+      "core_activities_solve_mobile_checkin",
+      "core_activities_solve_promotional_links",
+      "core_activities_solve_punch_cards",
+      "core_activities_solve_read_to_earn",
+      "core_activities_solve_wallpaper_trivia",
+      "core_activities_tap_corner_rewards_coin",
+      "core_ai_solver_rationale_78",
+      "core_ai_solver_unload_model_from_vram",
+      "core_init",
+      "core_init_rationale_1",
+      "path",
+      "runner_rationale_415",
+      "runner_run_full_pipeline",
+      "struct",
+      "zlib"
+    ],
+    "1": [
+      "core_logger",
+      "core_logger_rationale_1",
+      "core_mobile_app_api",
+      "core_mobile_app_api_activity_awarded_points",
+      "core_mobile_app_api_build_sapphire_headers",
+      "core_mobile_app_api_extract_balance",
+      "core_mobile_app_api_extract_checkin_day",
+      "core_mobile_app_api_extract_promotion_id",
+      "core_mobile_app_api_get_balance",
+      "core_mobile_app_api_get_checkin_promotion",
+      "core_mobile_app_api_get_mobile_access_token",
+      "core_mobile_app_api_py_page",
+      "core_mobile_app_api_rationale_1",
+      "core_mobile_app_api_rationale_366",
+      "core_mobile_app_api_rationale_398",
+      "core_mobile_app_api_rationale_493",
+      "core_mobile_app_api_rationale_58",
+      "core_mobile_app_api_rationale_596",
+      "core_mobile_app_api_solve_mobile_app_daily_checkin",
+      "core_mobile_app_api_solve_mobile_app_promotions",
+      "core_mobile_app_api_solve_mobile_app_read_to_earn",
+      "core_mobile_app_api_submit_checkin_activity",
+      "core_tracker",
+      "core_tracker_finish_session",
+      "core_tracker_get_history_summary",
+      "core_tracker_init_session",
+      "core_tracker_log_debug",
+      "core_tracker_log_error",
+      "core_tracker_log_exception",
+      "core_tracker_log_info",
+      "core_tracker_log_session_result",
+      "core_tracker_log_warning",
+      "core_tracker_rationale_1",
+      "core_tracker_rationale_138",
+      "core_tracker_rationale_176",
+      "core_tracker_rationale_215",
+      "core_tracker_rationale_256",
+      "core_tracker_rationale_297",
+      "core_tracker_update_session",
+      "json",
+      "logging",
+      "requests",
+      "runner_ensure_desktop_page",
+      "runner_is_today_already_completed",
+      "runner_rationale_1167",
+      "runner_rationale_1183",
+      "runner_rationale_1232",
+      "runner_rationale_338",
+      "runner_save_daily_state",
+      "runner_update_points_ledger",
+      "uuid"
+    ],
+    "2": [
+      "any",
+      "core_fingerprint",
+      "core_fingerprint_generate_seed_hash",
+      "core_fingerprint_get_deterministic_hardware_profile",
+      "core_fingerprint_inject_stealth_fingerprint",
+      "core_fingerprint_rationale_1",
+      "core_fingerprint_rationale_11",
+      "core_fingerprint_rationale_33",
+      "core_tracker_extract_current_points",
+      "core_tracker_py_page",
+      "core_tracker_rationale_73",
+      "ctypes",
+      "datetime",
+      "hashlib",
+      "importlib",
+      "os",
+      "psutil",
+      "re",
+      "runner",
+      "runner_apply_stealth_scripts",
+      "runner_cleanup_zombie_browsers",
+      "runner_create_desktop_context",
+      "runner_create_mobile_context",
+      "runner_ensure_mobile_page",
+      "runner_get_sync_playwright",
+      "runner_is_user_active",
+      "runner_lastinputinfo",
+      "runner_main",
+      "runner_purge_profile_caches",
+      "runner_rationale_1116",
+      "runner_rationale_113",
+      "runner_rationale_1145",
+      "runner_rationale_1327",
+      "runner_rationale_1376",
+      "runner_rationale_2",
+      "runner_rationale_207",
+      "runner_rationale_276",
+      "runner_rationale_303",
+      "runner_rationale_373",
+      "runner_wait_for_internet",
+      "shutil",
+      "socket",
+      "traceback",
+      "typing",
+      "urllib_parse"
+    ],
+    "3": [
+      "core_humanizer",
+      "core_humanizer_cooldown_sleep",
+      "core_humanizer_gaussian_delay",
+      "core_humanizer_human_read_delay",
+      "core_humanizer_human_scroll_delay",
+      "core_humanizer_maybe_click_result",
+      "core_humanizer_random_viewport_offset",
+      "core_humanizer_rationale_1",
+      "core_humanizer_rationale_102",
+      "core_humanizer_rationale_112",
+      "core_humanizer_rationale_125",
+      "core_humanizer_rationale_23",
+      "core_humanizer_rationale_50",
+      "core_humanizer_rationale_63",
+      "core_humanizer_rationale_92",
+      "core_humanizer_typing_delay",
+      "core_trends",
+      "core_trends_fetch_trending_queries",
+      "core_trends_generate_diverse_queries",
+      "core_trends_get_unique_search_queries",
+      "core_trends_load_searched_history",
+      "core_trends_rationale_1",
+      "core_trends_rationale_121",
+      "core_trends_rationale_164",
+      "core_trends_rationale_193",
+      "core_trends_rationale_78",
+      "html",
+      "io",
+      "math",
+      "random",
+      "xml_etree_elementtree"
+    ],
+    "4": [
+      "argparse",
+      "inspect_action_tray",
+      "inspect_msn_coin",
+      "inspect_msn_coin_rationale_2",
+      "inspect_msn_coin_run_inspection",
+      "patchright_sync_api",
+      "pathlib",
+      "setup_login",
+      "setup_login_apply_stealth_scripts",
+      "setup_login_get_mobile_device_choice",
+      "setup_login_launch_desktop_login",
+      "setup_login_launch_mobile_login",
+      "setup_login_main",
+      "setup_login_print_banner",
+      "setup_login_print_menu",
+      "setup_login_rationale_112",
+      "setup_login_rationale_126",
+      "setup_login_rationale_187",
+      "setup_login_rationale_2",
+      "setup_login_rationale_36",
+      "setup_login_rationale_93",
+      "sys"
+    ],
+    "5": [
+      "core_searcher",
+      "core_searcher_execute_single_search",
+      "core_searcher_human_bezier_move",
+      "core_searcher_human_type_and_search",
+      "core_searcher_perform_post_search_dwell_and_ctr",
+      "core_searcher_perform_related_cluster_search",
+      "core_searcher_py_page",
+      "core_searcher_rationale_1",
+      "core_searcher_rationale_112",
+      "core_searcher_rationale_152",
+      "core_searcher_rationale_240",
+      "core_searcher_rationale_286",
+      "core_searcher_rationale_29",
+      "core_searcher_rationale_378",
+      "core_searcher_rationale_591",
+      "core_searcher_simulate_organic_click",
+      "core_searcher_smooth_scroll",
+      "core_trends_rationale_96",
+      "core_trends_save_searched_keyword",
+      "runner_execute_single_search",
+      "runner_rationale_126"
+    ],
+    "6": [
+      "core_ai_solver",
+      "core_ai_solver_ask_local_ai",
+      "core_ai_solver_ensure_ollama_service",
+      "core_ai_solver_rationale_14",
+      "core_ai_solver_rationale_35",
+      "core_ai_solver_rationale_96",
+      "core_ai_solver_solve_quiz_with_ai",
+      "runner_active_edge_browsing_cooldown",
+      "runner_put_pc_to_sleep",
+      "runner_rationale_1394",
+      "runner_rationale_142",
+      "subprocess",
+      "time",
+      "urllib_error",
+      "urllib_request"
+    ],
+    "7": [
+      "setup",
+      "setup_write_errormsg",
+      "setup_write_header",
+      "setup_write_step",
+      "setup_write_success",
+      "setup_write_warningmsg"
+    ],
+    "8": [
+      "core_activities_create_random_sample_png",
+      "core_activities_create_random_sample_png_png_chunk",
+      "core_activities_ensure_sample_image",
+      "core_activities_rationale_1893",
+      "core_activities_rationale_1923"
+    ],
+    "9": [
+      "omniroute_gateway",
+      "screenshots_screenshot_2026_10_31_172252",
+      "screenshots_screenshot_2026_10_31_210913"
+    ],
+    "10": [
+      "screenshots_screenshot_2026_10_18_013451",
+      "screenshots_screenshot_2026_10_18_013840"
+    ],
+    "11": [
+      "screenshots_screenshot_2026_10_18_222537",
+      "screenshots_screenshot_2026_10_19_045148"
+    ],
+    "12": [
+      "schedule_setup"
+    ],
+    "13": [
+      "screenshots_screenshot_2026_10_17_142527"
+    ],
+    "14": [
+      "screenshots_screenshot_2026_10_17_220158"
+    ],
+    "15": [
+      "screenshots_screenshot_2026_10_17_221236"
+    ],
+    "16": [
+      "screenshots_screenshot_2026_10_17_221259"
+    ],
+    "17": [
+      "screenshots_screenshot_2026_10_17_221655"
+    ],
+    "18": [
+      "screenshots_screenshot_2026_10_17_221935"
+    ],
+    "19": [
+      "screenshots_screenshot_2026_10_17_222155"
+    ],
+    "20": [
+      "screenshots_screenshot_2026_10_17_232611"
+    ],
+    "21": [
+      "screenshots_screenshot_2026_10_17_233254"
+    ],
+    "22": [
+      "screenshots_screenshot_2026_10_18_013956"
+    ],
+    "23": [
+      "screenshots_screenshot_2026_10_18_014030"
+    ],
+    "24": [
+      "screenshots_screenshot_2026_10_18_214301"
+    ],
+    "25": [
+      "screenshots_screenshot_2026_10_19_051249"
+    ],
+    "26": [
+      "screenshots_screenshot_2026_10_19_051308"
+    ],
+    "27": [
+      "screenshots_screenshot_2026_10_21_224556"
+    ],
+    "28": [
+      "screenshots_screenshot_2026_10_21_235135"
+    ],
+    "29": [
+      "screenshots_screenshot_2026_10_23_015101"
+    ],
+    "30": [
+      "screenshots_screenshot_2026_10_23_030153"
+    ],
+    "31": [
+      "screenshots_screenshot_2026_10_27_112027"
+    ],
+    "32": [
+      "screenshots_screenshot_2026_10_27_180926"
+    ],
+    "33": [
+      "screenshots_screenshot_2026_10_27_181011"
+    ],
+    "34": [
+      "screenshots_screenshot_2026_10_27_190716"
+    ],
+    "35": [
+      "screenshots_screenshot_2026_10_27_193042"
+    ],
+    "36": [
+      "screenshots_screenshot_2026_10_27_193403"
+    ],
+    "37": [
+      "screenshots_screenshot_2026_10_27_194445"
+    ],
+    "38": [
+      "screenshots_screenshot_2026_10_27_223052"
+    ],
+    "39": [
+      "screenshots_screenshot_2026_10_28_214727"
+    ],
+    "40": [
+      "screenshots_screenshot_2026_10_29_223746"
+    ]
+  },
+  "cohesion": {
+    "0": 0.0744047619047619,
+    "1": 0.09411764705882353,
+    "2": 0.06262626262626263,
+    "3": 0.0989247311827957,
+    "4": 0.14285714285714285,
+    "5": 0.19047619047619047,
+    "6": 0.18095238095238095,
+    "7": 0.3333333333333333,
+    "8": 0.4,
+    "9": 0.6666666666666666,
+    "10": 1.0,
+    "11": 1.0,
+    "12": 1.0,
+    "13": 1.0,
+    "14": 1.0,
+    "15": 1.0,
+    "16": 1.0,
+    "17": 1.0,
+    "18": 1.0,
+    "19": 1.0,
+    "20": 1.0,
+    "21": 1.0,
+    "22": 1.0,
+    "23": 1.0,
+    "24": 1.0,
+    "25": 1.0,
+    "26": 1.0,
+    "27": 1.0,
+    "28": 1.0,
+    "29": 1.0,
+    "30": 1.0,
+    "31": 1.0,
+    "32": 1.0,
+    "33": 1.0,
+    "34": 1.0,
+    "35": 1.0,
+    "36": 1.0,
+    "37": 1.0,
+    "38": 1.0,
+    "39": 1.0,
+    "40": 1.0
+  },
+  "gods": [
+    {
+      "id": "runner_run_full_pipeline",
+      "label": "run_full_pipeline()",
+      "degree": 48
+    },
+    {
+      "id": "core_tracker_log_info",
+      "label": "_log_info()",
+      "degree": 28
+    },
+    {
+      "id": "core_tracker_log_warning",
+      "label": "_log_warning()",
+      "degree": 23
+    },
+    {
+      "id": "core_activities_dismiss_popups",
+      "label": "dismiss_popups()",
+      "degree": 16
+    },
+    {
+      "id": "core_mobile_app_api_solve_mobile_app_promotions",
+      "label": "solve_mobile_app_promotions()",
+      "degree": 15
+    },
+    {
+      "id": "core_tracker_log_debug",
+      "label": "_log_debug()",
+      "degree": 15
+    },
+    {
+      "id": "core_tracker_log_error",
+      "label": "_log_error()",
+      "degree": 14
+    },
+    {
+      "id": "core_activities_solve_keep_earning_activities",
+      "label": "solve_keep_earning_activities()",
+      "degree": 13
+    },
+    {
+      "id": "core_mobile_app_api_get_mobile_access_token",
+      "label": "get_mobile_access_token()",
+      "degree": 13
+    },
+    {
+      "id": "core_mobile_app_api_solve_mobile_app_read_to_earn",
+      "label": "solve_mobile_app_read_to_earn()",
+      "degree": 13
+    }
+  ],
+  "surprises": [
+    {
+      "source": "run_full_pipeline()",
+      "target": "solve_mobile_app_daily_checkin()",
+      "source_files": [
+        "runner.py",
+        "core/mobile_app_api.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "run_full_pipeline()",
+      "target": "solve_mobile_app_promotions()",
+      "source_files": [
+        "runner.py",
+        "core/mobile_app_api.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "run_full_pipeline()",
+      "target": "solve_mobile_app_read_to_earn()",
+      "source_files": [
+        "runner.py",
+        "core/mobile_app_api.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "run_full_pipeline()",
+      "target": "extract_current_points()",
+      "source_files": [
+        "runner.py",
+        "core/tracker.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    },
+    {
+      "source": "run_full_pipeline()",
+      "target": "finish_session()",
+      "source_files": [
+        "runner.py",
+        "core/tracker.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "connects across different repos/directories; bridges separate communities"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `run_full_pipeline()` connect `Microsoft Rewards Activity Automation` to `Mobile API and Logging`, `Anti-Detection Fingerprinting`, `Human Behavior Simulation`, `Human-Like Search Automation`, `AI Quiz Solver`?",
+      "why": "High betweenness centrality (0.045) - this node is a cross-community bridge."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `UI: AI Attendance - Live Monitoring View`, `UI: AI Attendance - Dashboard Overview`, `UI: AI Attendance - Debug Console Errors` to the rest of the system?",
+      "why": "34 weakly-connected nodes found - possible documentation gaps or missing edges."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Microsoft Rewards Activity Automation` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.0744047619047619 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `_log_info()` connect `Mobile API and Logging` to `Microsoft Rewards Activity Automation`, `Anti-Detection Fingerprinting`, `AI Quiz Solver`?",
+      "why": "High betweenness centrality (0.020) - this node is a cross-community bridge."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Mobile API and Logging` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.09411764705882353 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `solve_mobile_app_daily_checkin()` connect `Mobile API and Logging` to `Microsoft Rewards Activity Automation`, `Anti-Detection Fingerprinting`, `AI Quiz Solver`?",
+      "why": "High betweenness centrality (0.017) - this node is a cross-community bridge."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Anti-Detection Fingerprinting` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.06262626262626263 - nodes in this community are weakly interconnected."
+    }
+  ]
+}

@@ -1,18 +1,19 @@
 """
 Module cào dữ liệu trending queries từ Google Trends RSS và quản lý lịch sử tìm kiếm.
-Hỗ trợ chống trùng lặp từ khóa tuyệt đối (searched_history.json) và sinh truy vấn phong phú.
+Hỗ trợ chống trùng lặp từ khóa tuyệt đối (SQLite search_history table) và sinh truy vấn phong phú.
+Phase 7.2: Multi-account support with SQLite database.
 """
 
 import sys
 import io
-import json
 import urllib.request
 import xml.etree.ElementTree as ET
 import html
 import random
 from typing import List, Set, Optional
 
-from core.paths import DATA_DIR, SEARCH_HISTORY_FILE, LEGACY_HISTORY_FILE
+from core.database import get_recent_search_queries, add_search_queries
+from pathlib import Path
 
 # Force UTF-8 encoding for stdout/stderr on Windows (Python 3.7+ reconfigure)
 if sys.platform == "win32":
@@ -24,8 +25,6 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Thư mục lưu lịch sử tìm kiếm
-HISTORY_FILE = SEARCH_HISTORY_FILE
 
 # Danh sách từ khóa fallback cơ bản
 FALLBACK_KEYWORDS: List[str] = [
@@ -73,47 +72,25 @@ GENERAL_QUERIES = [
 ]
 
 
-def load_searched_history() -> List[str]:
-    """Đọc lịch sử từ khóa đã tìm kiếm từ searched_history.json (hoặc used_keywords.json)."""
-    target_file = HISTORY_FILE if HISTORY_FILE.exists() else (LEGACY_HISTORY_FILE if LEGACY_HISTORY_FILE.exists() else None)
-    if not target_file or not target_file.exists():
-        return []
-
+def load_searched_history(account_id: str = "acc_primary") -> List[str]:
+    """Đọc lịch sử từ khóa đã tìm kiếm từ database (SQLite search_history table)."""
     try:
-        with open(target_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return [str(item).strip() for item in data if str(item).strip()]
-            elif isinstance(data, dict) and "keywords" in data:
-                return [str(item).strip() for item in data["keywords"] if str(item).strip()]
+        return get_recent_search_queries(account_id, limit=200)
     except Exception as e:
-        print(f"[Trends] Không thể đọc file lịch sử: {e}")
+        print(f"[Trends] Không thể đọc lịch sử từ database: {e}")
     return []
 
 
-def save_searched_keyword(keyword: str, max_history: int = 200) -> None:
-    """Lưu từ khóa vừa tìm kiếm vào data/searched_history.json, giữ tối đa max_history từ."""
+def save_searched_keyword(keyword: str, account_id: str = "acc_primary", platform: str = "desktop") -> None:
+    """Lưu từ khóa vừa tìm kiếm vào database (SQLite search_history table)."""
     clean_kw = keyword.strip()
     if not clean_kw:
         return
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    history = load_searched_history()
-
-    # Kiểm tra xem từ đã có trong danh sách chưa (case-insensitive)
-    existing_lower = {k.lower() for k in history}
-    if clean_kw.lower() not in existing_lower:
-        history.append(clean_kw)
-
-    # Giữ tối đa max_history từ gần nhất
-    if len(history) > max_history:
-        history = history[-max_history:]
-
     try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
+        add_search_queries(account_id, [clean_kw], platform=platform)
     except Exception as e:
-        print(f"[Trends] Lỗi khi lưu searched_history.json: {e}")
+        print(f"[Trends] Lỗi khi lưu từ khóa vào database: {e}")
 
 
 def generate_diverse_queries(needed: int, exclude: Optional[Set[str]] = None) -> List[str]:
@@ -188,15 +165,19 @@ def fetch_trending_queries(geo: str = "VN", limit: int = 50) -> List[str]:
         return FALLBACK_KEYWORDS[:limit]
 
 
-def get_unique_search_queries(target_count: int, geo: str = "VN", max_history: int = 200) -> List[str]:
+def get_unique_search_queries(target_count: int, geo: str = "VN", account_id: str = "acc_primary", max_history: int = 200, exclude_queries: Optional[List[str]] = None) -> List[str]:
     """
     Lấy danh sách từ khóa tìm kiếm độc nhất tuyệt đối:
     1. Cào Google Trends mới nhất.
-    2. Lọc bỏ các từ khóa đã xuất hiện trong 200 từ gần nhất của data/searched_history.json.
+    2. Lọc bỏ các từ khóa đã xuất hiện trong 200 từ gần nhất của database (search_history table).
     3. Nếu không đủ số lượng, sinh thêm từ khóa từ bộ tổ hợp đời sống phong phú.
     """
-    history = load_searched_history()
+    history = load_searched_history(account_id)
     history_set = {k.lower().strip() for k in history if k}
+    
+    # Add additional exclude queries
+    if exclude_queries:
+        history_set.update({q.lower().strip() for q in exclude_queries if q})
 
     # Lấy Google Trends (yêu cầu nhiều hơn để lọc trùng)
     raw_trends = fetch_trending_queries(geo=geo, limit=max(50, target_count + 20))

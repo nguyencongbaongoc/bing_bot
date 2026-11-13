@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MS Rewards Bot Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent-blue: #3b82f6;
+            --accent-green: #22c55e;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+            --accent-purple: #a855f7;
+            --border-color: #334155;
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+            background: #475569;
+        }
+        
+        .pulse-dot {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            width: 100%;
+        }
+        
+        .terminal-line {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        
+        .log-info { color: #60a5fa; }
+        .log-warning { color: #fbbf24; }
+        .log-error { color: #f87171; }
+        .log-debug { color: #a78bfa; }
+        .log-success { color: #4ade80; }
+        
+        .progress-ring {
+            transform: rotate(-90deg);
+        }
+        .progress-ring-bg {
+            fill: none;
+            stroke: var(--bg-tertiary);
+            stroke-width: 4;
+        }
+        .progress-ring-fill {
+            fill: none;
+            stroke: var(--accent-blue);
+            stroke-width: 4;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.5s ease;
+        }
+        
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        
+        .task-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        
+        .task-pill.done {
+            background: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+        }
+        
+        .task-pill.pending {
+            background: rgba(148, 163, 184, 0.2);
+            color: #94a3b8;
+        }
+        
+        @media (max-width: 768px) {
+            .account-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <!-- Header -->
+    <header class="bg-[var(--bg-secondary)] border-b border-[var(--border-color)] sticky top-0 z-50">
+        <div class="max-w-full mx-auto px-4 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+                    <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold text-white">MS Rewards Bot</h1>
+                    <p class="text-xs text-[var(--text-secondary)]">Multi-Account Control Center • Phase 7.4</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center gap-3 flex-wrap">
+                <div class="flex items-center gap-2 px-3 py-1 bg-[var(--bg-tertiary)] rounded-lg">
+                    <span id="totalPoints" class="font-mono text-lg font-bold text-[var(--accent-amber)]">0</span>
+                    <span class="text-xs text-[var(--text-secondary)]">Total Points</span>
+                </div>
+                <div class="flex items-center gap-2 px-3 py-1 bg-[var(--bg-tertiary)] rounded-lg">
+                    <span id="todayEarned" class="font-mono text-lg font-bold text-[var(--accent-green)]">+0</span>
+                    <span class="text-xs text-[var(--text-secondary)]">Today</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span id="runnerStatus" class="badge bg-gray-800 text-[var(--text-secondary)]">
+                        <span class="w-2 h-2 rounded-full bg-gray-500 mr-2"></span>
+                        Idle
+                    </span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Safety Banner -->
+        <div id="safetyBanner" class="hidden px-4 py-2 bg-red-900/30 border-b border-red-800/50">
+            <div class="max-w-full mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div class="flex items-center gap-2 text-red-300">
+                    <svg class="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/>
+                    </svg>
+                    <span id="safetyText" class="text-sm font-medium"></span>
+                </div>
+                <button onclick="document.getElementById('safetyBanner').classList.add('hidden')" class="text-red-400 hover:text-red-200 text-sm">
+                    Dismiss
+                </button>
+            </div>
+        </div>
+        
+        <!-- Top Actions -->
+        <div class="px-4 py-3 border-b border-[var(--border-color)] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div class="flex items-center gap-3 flex-wrap">
+                <button id="btnRunAll" class="px-4 py-2 bg-[var(--accent-blue)] hover:bg-blue-600 text-white font-medium rounded-lg transition-colors flex items-center gap-2" disabled>
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9zm0-10.5a10.5 10.5 0 100 21 10.5 10.5 0 000-21z"></path>
+                    </svg>
+                    Run All Queue
+                </button>
+                <button id="btnOnboard" class="px-4 py-2 bg-[var(--accent-purple)] hover:bg-purple-600 text-white font-medium rounded-lg transition-colors flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"></path>
+                    </svg>
+                    + Onboard Account
+                </button>
+                <button id="btnRefresh" class="px-4 py-2 bg-[var(--bg-tertiary)] hover:bg-gray-700 text-white font-medium rounded-lg transition-colors flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+            
+            <div class="flex items-center gap-2">
+                <label class="text-xs text-[var(--text-secondary)]">Log Filter:</label>
+                <select id="logFilter" class="px-3 py-1 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]">
+                    <option value="all">All Accounts</option>
+                </select>
+            </div>
+        </div>
+    </header>
+    
+    <!-- Main Content -->
+    <main class="flex-1 max-w-full mx-auto w-full p-4 overflow-auto">
+        <!-- Accounts Grid -->
+        <section class="mb-6">
+            <h2 class="text-lg font-semibold mb-3 flex items-center gap-2">
+                <svg class="w-5 h-5 text-[var(--accent-blue)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                </svg>
+                Accounts
+            </h2>
+            <div id="accountsGrid" class="account-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                <!-- Account cards rendered here -->
+            </div>
+        </section>
+        
+        <!-- Charts & Logs Row -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <!-- Points History Chart -->
+            <section class="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl p-4">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-lg font-semibold">Points History (30 Days)</h2>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-[var(--text-secondary)]">Show:</span>
+                        <select id="chartAccountFilter" class="px-2 py-1 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded text-sm text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]">
+                            <option value="all">All Accounts Combined</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="pointsChart"></canvas>
+                </div>
+            </section>
+            
+            <!-- Live Log Terminal -->
+            <section class="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl p-4 flex flex-col">
+                <div class="flex items-center justify-between mb-3">
+                    <h2 class="text-lg font-semibold">Live Log Stream</h2>
+                    <div class="flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-[var(--accent-green)] pulse-dot"></span>
+                        <span class="text-xs text-[var(--text-secondary)]" id="wsStatus">Connected</span>
+                        <button id="btnClearLogs" class="px-2 py-1 text-xs text-[var(--text-secondary)] hover:text-white">Clear</button>
+                    </div>
+                </div>
+                <div id="logTerminal" class="flex-1 min-h-[300px] max-h-[400px] overflow-y-auto scrollbar-thin bg-[var(--bg-primary)] rounded-lg p-3 font-mono text-xs">
+                    <div class="text-[var(--text-secondary)] text-center py-8">Connecting to WebSocket...</div>
+                </div>
+            </section>
+        </div>
+    </main>
+    
+    <!-- Footer -->
+    <footer class="bg-[var(--bg-secondary)] border-t border-[var(--border-color)] px-4 py-3">
+        <div class="max-w-full mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-[var(--text-secondary)]">
+            <span>MS Rewards Bot Dashboard v7.4</span>
+            <span>WebSocket: <span id="wsState" class="font-mono">disconnected</span></span>
+        </div>
+    </footer>
+    
+    <!-- Onboard Modal -->
+    <div id="onboardModal" class="fixed inset-0 bg-black/60 hidden items-center justify-center z-50 p-4">
+        <div class="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl w-full max-w-md overflow-hidden">
+            <div class="px-5 py-4 border-b border-[var(--border-color)] flex items-center justify-between">
+                <h3 class="text-lg font-semibold">Onboard New Account</h3>
+                <button onclick="closeOnboardModal()" class="text-[var(--text-secondary)] hover:text-white">✕</button>
+            </div>
+            <form id="onboardForm" class="p-5 space-y-4">
+                <div>
+                    <label class="block text-sm font-medium mb-1">Account ID *</label>
+                    <input type="text" id="obAccountId" required class="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]" placeholder="acc_02">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1">Display Name</label>
+                    <input type="text" id="obDisplayName" class="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]" placeholder="My Second Account">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1">Proxy URL (optional)</label>
+                    <input type="text" id="obProxyUrl" class="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]" placeholder="http://user:pass@ip:port or socks5://...">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Preferred Hour (0-23)</label>
+                        <input type="number" id="obPreferredHour" min="0" max="23" class="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]" placeholder="6">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Target Points</label>
+                        <input type="number" id="obTargetPoints" min="0" class="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]" placeholder="50000">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1">Target Reward</label>
+                    <input type="text" id="obTargetReward" class="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent-blue)]" placeholder="Xbox Gift Card">
+                </div>
+                <div class="flex gap-3 pt-2">
+                    <button type="button" onclick="closeOnboardModal()" class="flex-1 px-4 py-2 bg-[var(--bg-tertiary)] hover:bg-gray-700 text-white font-medium rounded-lg transition-colors">Cancel</button>
+                    <button type="submit" class="flex-1 px-4 py-2 bg-[var(--accent-purple)] hover:bg-purple-600 text-white font-medium rounded-lg transition-colors">Start Onboarding</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        // =============================================================================
+        // STATE
+        // =============================================================================
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        let pointsChart = null;
+        let allAccounts = [];
+        let logFilter = 'all';
+        let chartAccountFilter = 'all';
+        
+        // =============================================================================
+        // INITIALIZATION
+        // =============================================================================
+        document.addEventListener('DOMContentLoaded', () => {
+            loadOverview();
+            connectWebSocket();
+            setupEventListeners();
+        });
+        
+        function setupEventListeners() {
+            // Top buttons
+            document.getElementById('btnRunAll').addEventListener('click', runAllQueue);
+            document.getElementById('btnOnboard').addEventListener('click', openOnboardModal);
+            document.getElementById('btnRefresh').addEventListener('click', loadOverview);
+            document.getElementById('btnClearLogs').addEventListener('click', clearLogs);
+            
+            // Filters
+            document.getElementById('logFilter').addEventListener('change', (e) => {
+                logFilter = e.target.value;
+                filterLogs();
+            });
+            document.getElementById('chartAccountFilter').addEventListener('change', (e) => {
+                chartAccountFilter = e.target.value;
+                updateChart();
+            });
+            
+            // Onboard modal
+            document.getElementById('onboardForm').addEventListener('submit', submitOnboard);
+            document.getElementById('onboardModal').addEventListener('click', (e) => {
+                if (e.target === e.currentTarget) closeOnboardModal();
+            });
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') closeOnboardModal();
+                if (e.key === 'r' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    loadOverview();
+                }
+            });
+        }
+        
+        // =============================================================================
+        // API CALLS
+        // =============================================================================
+        async function apiGet(endpoint) {
+            try {
+                const response = await fetch(endpoint);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return await response.json();
+            } catch (e) {
+                console.error(`API GET ${endpoint} failed:`, e);
+                throw e;
+            }
+        }
+        
+        async function apiPost(endpoint, data) {
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
+                    throw new Error(err.detail || `HTTP ${response.status}`);
+                }
+                return await response.json();
+            } catch (e) {
+                console.error(`API POST ${endpoint} failed:`, e);
+                throw e;
+            }
+        }
+        
+        // =============================================================================
+        // OVERVIEW & RENDERING
+        // =============================================================================
+        async function loadOverview() {
+            try {
+                const data = await apiGet('/api/overview');
+                allAccounts = data.accounts || [];
+                
+                // Update summary
+                document.getElementById('totalPoints').textContent = formatNumber(data.summary?.total_points || 0);
+                document.getElementById('todayEarned').textContent = '+' + formatNumber(data.summary?.total_earned_today || 0);
+                
+                // Runner status
+                const runnerStatus = document.getElementById('runnerStatus');
+                const isRunning = data.summary?.active_runner;
+                runnerStatus.innerHTML = `
+                    <span class="w-2 h-2 rounded-full ${isRunning ? 'bg-green-500 pulse-dot' : 'bg-gray-500'} mr-2"></span>
+                    ${isRunning ? 'Running' : 'Idle'}
+                `;
+                runnerStatus.className = `badge ${isRunning ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-400'}`;
+                
+                document.getElementById('btnRunAll').disabled = isRunning;
+                
+                // Safety banner
+                const warnings = data.ip_warnings || [];
+                const safetyBanner = document.getElementById('safetyBanner');
+                if (warnings.length > 0) {
+                    document.getElementById('safetyText').textContent = warnings.join(' | ');
+                    safetyBanner.classList.remove('hidden');
+                } else {
+                    safetyBanner.classList.add('hidden');
+                }
+                
+                // Render accounts
+                renderAccounts();
+                updateChart();
+                updateFilters();
+                
+            } catch (e) {
+                console.error('Failed to load overview:', e);
+            }
+        }
+        
+        function renderAccounts() {
+            const grid = document.getElementById('accountsGrid');
+            grid.innerHTML = '';
+            
+            allAccounts.forEach(acc => {
+                const card = createAccountCard(acc);
+                grid.appendChild(card);
+            });
+        }
+        
+        function createAccountCard(acc) {
+            const card = document.createElement('div');
+            card.className = 'bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl p-4 hover:border-[var(--accent-blue)]/50 transition-colors';
+            card.dataset.accountId = acc.account_id;
+            
+            const daily = acc.daily_progress || {};
+            const progress = acc.current_points || 0;
+            const target = acc.target_points || 0;
+            const pct = target > 0 ? Math.min(100, (progress / target) * 100) : 0;
+            
+            // Task pills
+            const pcDone = daily.pc_searches_done || 0;
+            const pcTarget = daily.pc_searches_target || 90;
+            const mobDone = daily.mobile_searches_done || 0;
+            const mobTarget = daily.mobile_searches_target || 60;
+            const actDone = daily.activities_done || 0;
+            const checkinAwarded = daily.checkin_awarded || 0;
+            
+            card.innerHTML = `
+                <div class="flex items-start justify-between mb-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="font-medium text-white truncate">${escapeHtml(acc.display_name || acc.account_id)}</span>
+                            <span class="text-xs px-2 py-0.5 bg-[var(--bg-tertiary)] rounded">${escapeHtml(acc.account_id)}</span>
+                            ${acc.enabled ? '' : '<span class="text-xs px-2 py-0.5 bg-gray-800 text-gray-400 rounded">Paused</span>'}
+                        </div>
+                        <div class="flex items-center gap-2 text-xs text-[var(--text-secondary)] flex-wrap">
+                            ${acc.proxy_url ? `
+                                <span class="px-2 py-0.5 bg-[var(--bg-tertiary)] rounded flex items-center gap-1">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+                                    ${escapeHtml(truncate(acc.proxy_url, 30))}
+                                </span>
+                            ` : ''}
+                            <span class="px-2 py-0.5 bg-[var(--bg-tertiary)] rounded flex items-center gap-1">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z"></path></svg>
+                                ${escapeHtml(acc.timezone || 'UTC')}
+                            </span>
+                            ${acc.preferred_hour ? `
+                                <span class="px-2 py-0.5 bg-[var(--bg-tertiary)] rounded flex items-center gap-1">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                    ${acc.preferred_hour}:00
+                                </span>
+                            ` : ''}
+                        </div>
+                    </div>
+                    ${acc.redeem_ready ? `
+                        <div class="badge bg-green-900/30 text-green-400 ml-2 flex-shrink-0">
+                            <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
+                            Redeem Ready
+                        </div>
+                    ` : ''}
+                </div>
+                
+                <!-- Daily Tasks -->
+                <div class="flex flex-wrap gap-2 mb-3">
+                    <span class="task-pill ${pcDone >= pcTarget ? 'done' : 'pending'}">
+                        <span class="w-1.5 h-1.5 rounded-full ${pcDone >= pcTarget ? 'bg-green-500' : 'bg-gray-500'}"></span>
+                        PC ${pcDone}/${pcTarget}
+                    </span>
+                    <span class="task-pill ${mobDone >= mobTarget ? 'done' : 'pending'}">
+                        <span class="w-1.5 h-1.5 rounded-full ${mobDone >= mobTarget ? 'bg-green-500' : 'bg-gray-500'}"></span>
+                        Mobile ${mobDone}/${mobTarget}
+                    </span>
+                    <span class="task-pill ${actDone >= 1 ? 'done' : 'pending'}">
+                        <span class="w-1.5 h-1.5 rounded-full ${actDone >= 1 ? 'bg-green-500' : 'bg-gray-500'}"></span>
+                        Daily Set ${actDone}/1
+                    </span>
+                    <span class="task-pill ${daily.status === 'completed' ? 'done' : 'pending'}">
+                        <span class="w-1.5 h-1.5 rounded-full ${daily.status === 'completed' ? 'bg-green-500' : 'bg-gray-500'}"></span>
+                        Visual 1/1
+                    </span>
+                </div>
+                
+                <!-- Bing Star Bonus -->
+                <div class="mb-3 p-2 bg-[var(--bg-primary)] rounded-lg">
+                    <div class="flex items-center justify-between text-xs mb-1">
+                        <span class="text-[var(--text-secondary)]">Bing Star Bonus</span>
+                        <span class="text-white font-mono">${escapeHtml(acc.bing_star_bonus || '0 / 2,100')}</span>
+                    </div>
+                    <div class="h-1.5 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
+                        const starText = acc.bing_star_bonus || '0 / 2,100';
+                        const starMatch = starText.match(/(\\d[\\d,]*)\\s*\\/\\s*(\\d[\\d,]*)/);
+                        let starPct = 0;
+                        if (starMatch) {
+                            const cur = parseInt(starMatch[1].replace(/,/g, ''));
+                            const max = parseInt(starMatch[2].replace(/,/g, ''));
+                            starPct = max > 0 ? Math.min(100, (cur / max) * 100) : 0;
+                        }
+                        <div class="h-full bg-gradient-to-r from-amber-500 to-yellow-500 rounded-full transition-all duration-500" style="width: ${starPct}%"></div>
+                    </div>
+                </div>
+                
+                <!-- Reward Progress -->
+                ${target > 0 ? `
+                    <div class="mb-3">
+                        <div class="flex items-center justify-between text-xs mb-1">
+                            <span class="text-[var(--text-secondary)]">Reward Progress</span>
+                            <span class="text-white font-mono">${formatNumber(progress)} / ${formatNumber(target)}</span>
+                        </div>
+                        <div class="h-1.5 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
+                            <div class="h-full bg-gradient-to-r from-blue-500 to-purple-500 rounded-full transition-all duration-500" style="width: ${pct}%"></div>
+                        </div>
+                    </div>
+                ` : ''}
+                
+                <!-- Action Buttons -->
+                <div class="flex flex-wrap gap-2 pt-2 border-t border-[var(--border-color)]">
+                    ${acc.redeem_ready ? `
+                        <button onclick="openRedeem('${acc.account_id}')" class="flex-1 px-3 py-2 bg-[var(--accent-amber)] hover:bg-amber-600 text-black font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-1">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                            Manual Redeem
+                        </button>
+                    ` : ''}
+                    <button onclick="runSingle('${acc.account_id}')" class="${acc.redeem_ready ? 'flex-1' : 'w-full'} px-3 py-2 bg-[var(--accent-blue)] hover:bg-blue-600 text-white font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-1" ${acc.enabled ? '' : 'disabled'}>
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9zm0-10.5a10.5 10.5 0 100 21 10.5 10.5 0 000-21z"></path></svg>
+                        Run Now
+                    </button>
+                    <button onclick="toggleAccount('${acc.account_id}', ${!acc.enabled})" class="flex-1 px-3 py-2 ${acc.enabled ? 'bg-gray-700 hover:bg-gray-600' : 'bg-green-700 hover:bg-green-600'} text-white font-medium rounded-lg text-sm transition-colors flex items-center justify-center gap-1">
+                        ${acc.enabled ? 'Pause' : 'Resume'}
+                    </button>
+                </div>
+            `;
+            
+            return card;
+        }
+        
+        function updateFilters() {
+            const logFilterEl = document.getElementById('logFilter');
+            const chartFilterEl = document.getElementById('chartAccountFilter');
+            
+            const currentLog = logFilterEl.value;
+            const currentChart = chartFilterEl.value;
+            
+            logFilterEl.innerHTML = '<option value="all">All Accounts</option>' +
+                allAccounts.map(a => `<option value="${a.account_id}">${escapeHtml(a.display_name || a.account_id)}</option>`).join('');
+            logFilterEl.value = currentLog;
+            
+            chartFilterEl.innerHTML = '<option value="all">All Accounts Combined</option>' +
+                allAccounts.map(a => `<option value="${a.account_id}">${escapeHtml(a.display_name || a.account_id)}</option>`).join('');
+            chartFilterEl.value = currentChart;
+        }
+        
+        // =============================================================================
+        // CHART
+        // =============================================================================
+        function updateChart() {
+            const ctx = document.getElementById('pointsChart').getContext('2d');
+            
+            // Prepare datasets
+            const datasets = [];
+            const labels = new Set();
+            
+            if (chartAccountFilter === 'all') {
+                // Combine all accounts
+                const combined = {};
+                allAccounts.forEach(acc => {
+                    (acc.ledger_history || []).forEach(h => {
+                        if (h.date && h.total_points !== undefined) {
+                            if (!combined[h.date] || combined[h.date] < h.total_points) {
+                                combined[h.date] = h.total_points;
+                            }
+                        }
+                    });
+                });
+                
+                const sortedDates = Object.keys(combined).sort();
+                const data = sortedDates.map(d => combined[d]);
+                
+                datasets.push({
+                    label: 'Total Points (All Accounts)',
+                    data: data,
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 3,
+                    pointHoverRadius: 5,
+                });
+                
+                labels.add(...sortedDates);
+                
+            } else {
+                const acc = allAccounts.find(a => a.account_id === chartAccountFilter);
+                if (acc) {
+                    const history = acc.ledger_history || [];
+                    const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
+                    const dates = sorted.map(h => h.date);
+                    const data = sorted.map(h => h.total_points || 0);
+                    
+                    datasets.push({
+                        label: escapeHtml(acc.display_name || acc.account_id),
+                        data: data,
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 3,
+                        pointHoverRadius: 5,
+                    });
+                    
+                    labels.add(...dates);
+                }
+            }
+            
+            const sortedLabels = Array.from(labels).sort();
+            
+            if (pointsChart) {
+                pointsChart.data.labels = sortedLabels;
+                pointsChart.data.datasets = datasets;
+                pointsChart.update();
+            } else {
+                pointsChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: sortedLabels,
+                        datasets: datasets
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                labels: { color: '#94a3b8', font: { size: 11 } }
+                            },
+                            tooltip: {
+                                backgroundColor: '#1e293b',
+                                titleColor: '#f1f5f9',
+                                bodyColor: '#cbd5e1',
+                                borderColor: '#334155',
+                                borderWidth: 1,
+                                padding: 12,
+                                callbacks: {
+                                    label: (ctx) => `${ctx.dataset.label}: ${formatNumber(ctx.raw)} pts`
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                grid: { color: '#1e293b' },
+                                ticks: { color: '#64748b', font: { size: 10 }, maxTicksLimit: 10 }
+                            },
+                            y: {
+                                grid: { color: '#1e293b' },
+                                ticks: { 
+                                    color: '#64748b', 
+                                    font: { size: 10 },
+                                    callback: (val) => formatNumber(val)
+                                }
+                            }
+                        },
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        }
+                    }
+                });
+            }
+        }
+        
+        // =============================================================================
+        // WEBSOCKET
+        // =============================================================================
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                reconnectAttempts = 0;
+                updateWsStatus('Connected', true);
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'log' && msg.data) {
+                        appendLog(msg.data);
+                    } else if (msg.type === 'connected') {
+                        console.log('WS welcome:', msg.message);
+                    }
+                } catch (e) {
+                    console.error('WS message parse error:', e);
+                }
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket closed');
+                updateWsStatus('Disconnected', false);
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    console.log(`Reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
+                    setTimeout(connectWebSocket, delay);
+                }
+            };
+            
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+            };
+        }
+        
+        function updateWsStatus(text, connected) {
+            const statusEl = document.getElementById('wsStatus');
+            const stateEl = document.getElementById('wsState');
+            if (statusEl) statusEl.textContent = text;
+            if (stateEl) stateEl.textContent = connected ? 'connected' : 'disconnected';
+        }
+        
+        function appendLog(log) {
+            if (logFilter !== 'all' && log.account_id !== logFilter) return;
+            
+            const terminal = document.getElementById('logTerminal');
+            const line = document.createElement('div');
+            line.className = 'terminal-line';
+            
+            const time = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '';
+            const level = (log.level || 'info').toLowerCase();
+            const module = log.module ? `[${log.module}] ` : '';
+            const message = log.message || '';
+            
+            const levelColors = {
+                'info': 'log-info',
+                'warning': 'log-warning',
+                'error': 'log-error',
+                'debug': 'log-debug',
+                'success': 'log-success'
+            };
+            
+            line.innerHTML = `
+                <span class="text-[var(--text-secondary)]">[${time}]</span>
+                <span class="${levelColors[level] || 'log-info'}">[${level.toUpperCase()}]</span>
+                <span class="text-[var(--text-secondary)]">${module}</span>
+                <span class="text-white">${escapeHtml(message)}</span>
+            `;
+            
+            terminal.appendChild(line);
+            
+            // Auto-scroll if near bottom
+            const isNearBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 100;
+            if (isNearBottom) {
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+            
+            // Limit lines
+            while (terminal.children.length > 500) {
+                terminal.removeChild(terminal.firstChild);
+            }
+        }
+        
+        function filterLogs() {
+            // Re-render would be needed, but we just filter new logs
+            // For simplicity, we could reload but that's heavy
+            // Current approach: only filter incoming logs
+        }
+        
+        function clearLogs() {
+            document.getElementById('logTerminal').innerHTML = '';
+        }
+        
+        // =============================================================================
+        // ACTIONS
+        // =============================================================================
+        async function runAllQueue() {
+            const btn = document.getElementById('btnRunAll');
+            btn.disabled = true;
+            btn.innerHTML = `
+                <svg class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                Starting...
+            `;
+            
+            try {
+                await apiPost('/api/queue/run-all', {});
+                showToast('Queue started');
+            } catch (e) {
+                showToast('Failed to start queue: ' + e.message, 'error');
+            }
+            
+            // Re-enable after a moment (actual state updates via WS/refresh)
+            setTimeout(() => {
+                btn.disabled = false;
+                btn.innerHTML = `
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9zm0-10.5a10.5 10.5 0 100 21 10.5 10.5 0 000-21z"></path></svg>
+                    Run All Queue
+                `;
+                loadOverview();
+            }, 2000);
+        }
+        
+        async function runSingle(accountId) {
+            try {
+                await apiPost(`/api/accounts/${accountId}/run`, { force_now: true });
+                showToast(`Started run for ${accountId}`);
+                loadOverview();
+            } catch (e) {
+                showToast('Failed to start: ' + e.message, 'error');
+            }
+        }
+        
+        async function toggleAccount(accountId, enabled) {
+            try {
+                await apiPost(`/api/accounts/${accountId}/toggle`, { enabled });
+                showToast(`${enabled ? 'Resumed' : 'Paused'} ${accountId}`);
+                loadOverview();
+            } catch (e) {
+                showToast('Failed: ' + e.message, 'error');
+            }
+        }
+        
+        async function openRedeem(accountId) {
+            try {
+                await apiPost(`/api/accounts/${accountId}/open-redeem`, {});
+                showToast(`Opening redeem browser for ${accountId}...`);
+            } catch (e) {
+                showToast('Failed: ' + e.message, 'error');
+            }
+        }
+        
+        // =============================================================================
+        // ONBOARD MODAL
+        // =============================================================================
+        function openOnboardModal() {
+            document.getElementById('onboardForm').reset();
+            document.getElementById('onboardModal').classList.remove('hidden');
+            document.getElementById('onboardModal').classList.add('flex');
+            document.getElementById('obAccountId').focus();
+        }
+        
+        function closeOnboardModal() {
+            document.getElementById('onboardModal').classList.add('hidden');
+            document.getElementById('onboardModal').classList.remove('flex');
+        }
+        
+        async function submitOnboard(e) {
+            e.preventDefault();
+            
+            const data = {
+                account_id: document.getElementById('obAccountId').value.trim(),
+                display_name: document.getElementById('obDisplayName').value.trim(),
+                proxy_url: document.getElementById('obProxyUrl').value.trim() || null,
+                preferred_hour: parseInt(document.getElementById('obPreferredHour').value) || null,
+                target_points: parseInt(document.getElementById('obTargetPoints').value) || 0,
+                target_reward: document.getElementById('obTargetReward').value.trim() || null,
+            };
+            
+            if (!data.account_id) {
+                showToast('Account ID is required', 'error');
+                return;
+            }
+            
+            const btn = e.target.querySelector('button[type="submit"]');
+            btn.disabled = true;
+            btn.textContent = 'Starting...';
+            
+            try {
+                await apiPost('/api/accounts/onboard', data);
+                showToast(`Onboarding started for ${data.account_id}`);
+                closeOnboardModal();
+                // Poll for completion
+                setTimeout(loadOverview, 3000);
+            } catch (e) {
+                showToast('Failed: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Start Onboarding';
+            }
+        }
+        
+        // =============================================================================
+        // UTILITIES
+        // =============================================================================
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function truncate(str, len) {
+            if (str.length <= len) return str;
+            return str.substring(0, len - 3) + '...';
+        }
+        
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            return Number(num).toLocaleString();
+        }
+        
+        function showToast(message, type = 'info') {
+            // Simple toast implementation
+            const toast = document.createElement('div');
+            toast.className = `fixed bottom-4 right-4 px-4 py-3 rounded-lg shadow-lg text-white z-50 animate-slide-up ${
+                type === 'error' ? 'bg-red-600' : type === 'success' ? 'bg-green-600' : 'bg-blue-600'
+            }`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.classList.add('animate-fade-out');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+    </script>
+    <style>
+        @keyframes slide-up {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes fade-out {
+            to { transform: translateY(-20px); opacity: 0; }
+        }
+        .animate-slide-up { animation: slide-up 0.3s ease-out; }
+        .animate-fade-out { animation: fade-out 0.3s ease-in forwards; }
+    </style>
+</body>
+</html>

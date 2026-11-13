@@ -1838,7 +1838,7 @@ def solve_promotional_links(page: Page):
                 pass
                 
         # Cập nhật lại file
-        with open(promo_file, "w", encoding="utf-8") as f:
+        with open(PROMO_LINKS_FILE, "w", encoding="utf-8") as f:
             json.dump({"pending_links": [], "completed_links": completed}, f, indent=2)
         logger.info(f"  [✓] Đã xử lý {len(links)} link khuyến mãi.")
     except Exception as e:
