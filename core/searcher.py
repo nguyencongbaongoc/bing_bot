@@ -174,6 +174,7 @@ def simulate_organic_click(page: Page, is_mobile: bool = False):
 
         logger.info(f"[Stealth CTR 55%] Click tự nhiên vào kết quả tìm kiếm #{idx + 1}...")
 
+        serp_url = page.url
         initial_pages = list(page.context.pages)
         new_page = None
 
@@ -225,12 +226,17 @@ def simulate_organic_click(page: Page, is_mobile: bool = False):
                 smooth_scroll(page, random.randint(180, 400), is_mobile=is_mobile)
             time.sleep(1.0)
             try:
-                logger.debug("[Stealth CTR] Nhấn Back quay về kết quả tìm kiếm Bing...")
-                page.go_back(wait_until="domcontentloaded", timeout=8000)
-                page.wait_for_timeout(random.randint(1000, 1800))
+                target_back_url = serp_url if (serp_url and serp_url.startswith("http")) else "https://www.bing.com"
+                if page.url != target_back_url:
+                    logger.debug(f"[Stealth CTR] Quay về trang kết quả tìm kiếm: {target_back_url[:60]}...")
+                    page.goto(target_back_url, wait_until="domcontentloaded", timeout=10000)
+                page.wait_for_timeout(random.randint(800, 1500))
             except Exception as e:
-                logger.debug(f"[Stealth CTR] Không thể go_back, tải lại Bing: {e}")
-                page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=10000)
+                logger.debug(f"[Stealth CTR] Không thể quay về SERP, tải lại Bing: {e}")
+                try:
+                    page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
 
     except Exception as e:
         logger.debug(f"[Stealth CTR] Bỏ qua tương tác CTR: {e}")

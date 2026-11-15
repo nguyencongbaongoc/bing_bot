@@ -6,7 +6,9 @@ thông qua Bing Mobile App OAuth API chính thức, không cần giả lập And
 import datetime
 import json
 import logging
+import os
 import random
+import sys
 import time
 import urllib.parse
 import uuid
@@ -285,13 +287,17 @@ def _extract_checkin_day(promotions, promotion_id: str) -> int:
     return 1
 
 
+def _is_dapi_debug_enabled() -> bool:
+    """Only dump raw DAPI JSON when --debug CLI flag or DEBUG_DAPI=1 is active."""
+    return ("--debug" in sys.argv) or (os.environ.get("DEBUG_DAPI") == "1")
+
+
 def _get_checkin_promotion(access_token: str, country: str = "vn") -> dict:
     headers = _build_sapphire_headers(access_token, country)
     # Primary DAPI endpoint with options=613 as per protocol
     endpoints = (
         f"{REWARDS_API_BASE}/me?channel=BingApp&options=613",
         f"{REWARDS_API_BASE}/me?channel=StartApp&options=613",
-        f"{REWARDS_API_BASE}/me/promotions?channel=BingApp",
     )
     promotions = []
     raw_json = None
@@ -306,8 +312,8 @@ def _get_checkin_promotion(access_token: str, country: str = "vn") -> dict:
             continue
         raw_json = resp.json()
         
-        # Debug JSON logging when --debug flag is active
-        if logger.isEnabledFor(logging.DEBUG):
+        # Debug JSON logging when --debug flag or DEBUG_DAPI=1 is active
+        if _is_dapi_debug_enabled():
             try:
                 DATA_DIR.mkdir(parents=True, exist_ok=True)
                 with open(DEBUG_DAPI_FILE, "w", encoding="utf-8") as f:
@@ -518,8 +524,8 @@ def solve_mobile_app_promotions(page: Optional[Page] = None, country: str = "vn"
                 if isinstance(extra, list):
                     promotions.extend([p for p in extra if isinstance(p, dict)])
             
-            # Debug JSON logging when --debug flag is active
-            if logger.isEnabledFor(logging.DEBUG):
+            # Debug JSON logging when --debug flag or DEBUG_DAPI=1 is active
+            if _is_dapi_debug_enabled():
                 try:
                     DATA_DIR.mkdir(parents=True, exist_ok=True)
                     with open(DEBUG_DAPI_FILE, "w", encoding="utf-8") as f:

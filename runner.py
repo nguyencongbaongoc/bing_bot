@@ -84,6 +84,8 @@ from core.tracker import (
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
 DAILY_STATE_FILE = DATA_DIR / "daily_state.json"
+LOCK_FILE = DATA_DIR / "locks" / "runner.lock"
+EDGE_BROWSING_CAP_SECONDS = 1860  # 31 phút (30 phút + 1 phút buffer an toàn)
 DESKTOP_PROFILE = ROOT_DIR / "profiles" / "desktop"
 MOBILE_PROFILE = ROOT_DIR / "profiles" / "mobile"
 REWARDS_URL = "https://rewards.bing.com"
@@ -138,17 +140,26 @@ def execute_single_search(page, query: str, device_type: str = "desktop") -> boo
     return human_type_and_search(page, query, is_mobile=is_mobile)
 
 
-def active_edge_browsing_cooldown(page, total_seconds: int = 900):
+def active_edge_browsing_cooldown(page, total_seconds: int = 900, initial_seconds: int = 0):
     """
-    Duy trì phiên duyệt web Edge trong thời gian Cooldown để hoàn thành 
+    Duy trì phiên duyệt web Edge trong thời gian Cooldown để hoàn thành
     nhiệm vụ Edge Browsing Streak (30 phút/ngày) mà không tốn thêm thời gian.
     Lưu ý: Tuyệt đối KHÔNG gọi context.close().
-    Nếu có đóng page tạm, hãy đảm bảo mở sẵn một tab about:blank trước khi đóng tab cũ để Chromium không tự động thoát tiến trình.
+    Giới hạn cứng 1860s/ngày và lưu tiến độ mỗi 60s vào data/daily_state.json.
     """
-    logger.info(f"[Edge Browsing] Bắt đầu phiên duyệt web ngầm tích lũy thời gian ({total_seconds // 60} phút)...")
-    
+    remaining_cap = max(0, EDGE_BROWSING_CAP_SECONDS - initial_seconds)
+    target_seconds = min(total_seconds, remaining_cap)
+    if target_seconds <= 0:
+        update_edge_browsing_state(EDGE_BROWSING_CAP_SECONDS, done=True)
+        return page, 0
+
+    logger.info(
+        f"[Edge Browsing] Bắt đầu phiên duyệt web ngầm tích lũy thời gian "
+        f"({target_seconds // 60}m {target_seconds % 60}s, đã tích lũy {initial_seconds}s/{EDGE_BROWSING_CAP_SECONDS}s)..."
+    )
+
     context = getattr(page, "context", None)
-    
+
     # Đảm bảo duy trì ít nhất một tab sống (không bao giờ để 0 tab khiến browser thoát)
     try:
         if page is None or page.is_closed():
@@ -167,29 +178,45 @@ def active_edge_browsing_cooldown(page, total_seconds: int = 900):
         pass
 
     start_time = time.time()
-    interval = random.randint(120, 180)  # Tương tác mỗi 2-3 phút
+    last_persisted_at = start_time
+    last_scroll_at = start_time
+    scroll_interval = random.randint(120, 180)
 
-    while time.time() - start_time < total_seconds:
+    while True:
         elapsed = int(time.time() - start_time)
-        remaining = total_seconds - elapsed
-        
-        # Mô phỏng tương tác người dùng để Edge gửi Heartbeat Telemetry
-        try:
-            if page and not page.is_closed():
-                scroll_y = random.choice([300, 500, -200, 400])
-                page.mouse.wheel(0, scroll_y)
-                page.wait_for_timeout(1000)
-        except Exception:
-            pass
+        cumulative = initial_seconds + elapsed
+        if elapsed >= target_seconds or cumulative >= EDGE_BROWSING_CAP_SECONDS:
+            final_secs = min(EDGE_BROWSING_CAP_SECONDS, cumulative)
+            update_edge_browsing_state(final_secs, done=(final_secs >= EDGE_BROWSING_CAP_SECONDS))
+            break
 
-        # Ngủ chu kỳ ngắn
-        sleep_chunk = min(interval, remaining)
+        # Lưu tiến độ mỗi 60 giây vào data/daily_state.json
+        if time.time() - last_persisted_at >= 60:
+            update_edge_browsing_state(cumulative, done=False)
+            last_persisted_at = time.time()
+
+        # Mô phỏng tương tác người dùng mỗi 2-3 phút để Edge gửi Heartbeat Telemetry
+        if time.time() - last_scroll_at >= scroll_interval:
+            try:
+                if page and not page.is_closed():
+                    scroll_y = random.choice([300, 500, -200, 400])
+                    page.mouse.wheel(0, scroll_y)
+                    page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            last_scroll_at = time.time()
+            scroll_interval = random.randint(120, 180)
+
+        remaining = min(target_seconds - elapsed, EDGE_BROWSING_CAP_SECONDS - cumulative)
+        sleep_chunk = min(60, remaining)
         if sleep_chunk > 0:
-            logger.info(f"[Edge Browsing Streak] Đang tích lũy... Còn lại: {remaining // 60}m {remaining % 60}s")
+            logger.info(
+                f"[Edge Browsing Streak] Đang tích lũy ({cumulative}/{EDGE_BROWSING_CAP_SECONDS}s)... "
+                f"Còn lại đợt này: {remaining // 60}m {remaining % 60}s"
+            )
             time.sleep(sleep_chunk)
-            
-    # Khi hoàn thành 15 phút duyệt web, tuyệt đối KHÔNG đóng d_context.
-    # Đảm bảo luôn giữ ít nhất 1 tab sống; nếu đóng page tạm thì phải mở about:blank trước.
+
+    # Đảm bảo luôn giữ ít nhất 1 tab sống
     try:
         if context:
             open_pages = [p for p in context.pages if not p.is_closed()]
@@ -199,8 +226,9 @@ def active_edge_browsing_cooldown(page, total_seconds: int = 900):
     except Exception:
         pass
 
+    actual_elapsed = int(time.time() - start_time)
     logger.info("[Edge Browsing] Hoàn thành đợt tích lũy thời gian Cooldown.")
-    return page
+    return page, actual_elapsed
 
 
 def apply_stealth_scripts(context, is_mobile: bool = False, cpu_threads: int = None, account_id: str = "acc_primary"):
@@ -444,17 +472,7 @@ def run_full_pipeline(
         _log_info("[Daily Lock] Hôm nay đã hoàn thành 100% mục tiêu điểm. Thoát sớm để bảo vệ SSD & tài khoản!")
         return True
 
-    try:
-        cleanup_zombie_browsers()
-    except Exception:
-        pass
-
-    _log_info("=" * 60)
-    _log_info("  Microsoft Rewards Bot - Phase 5 Full Automation")
-    _log_info("=" * 60)
-    _log_info(f"Config: Desktop={desktop_target}, Mobile={mobile_target}, Batch={batch_size}")
-    _log_info(f"Headless: {headless}")
-    _log_info("")
+    _log_info(f"Config: Desktop={desktop_target}, Mobile={mobile_target}, Batch={batch_size} | Headless: {headless}")
 
     # Trễ khởi động ngẫu nhiên (Startup Jitter) khi chạy tự động ngầm để làm lệch mốc giờ máy móc
     if args and not getattr(args, "debug", False):
@@ -532,7 +550,14 @@ def run_full_pipeline(
 
                 # KIỂM TRA TIẾN ĐỘ THỰC TẾ TRÊN DASHBOARD / POINTS BREAKDOWN NGAY TỪ ĐẦU (SCAN PHASE 1)
                 initial_progress = get_daily_search_progress(d_page)
+                sync_edge_browsing_from_progress(initial_progress)
                 bing_star_bonus_str = initial_progress.get("bing_star_bonus", {}).get("text", bing_star_bonus_str)
+                verified_pc_cur = initial_progress.get("pc_cur", 0)
+                verified_pc_max = initial_progress.get("pc_max", 90)
+                verified_mob_cur = initial_progress.get("mobile_cur", 0)
+                verified_mob_max = initial_progress.get("mobile_max", 60)
+                verified_found_pc = initial_progress.get("found_pc", False)
+                verified_found_mob = initial_progress.get("found_mobile", False)
                 all_maxed = initial_progress.get("all_maxed", False)
                 all_activities_done = initial_progress.get("all_activities_done", False)
                 init_act = initial_progress.get("activities", {})
@@ -599,42 +624,56 @@ def run_full_pipeline(
 
                     # Giải các thẻ sự kiện Punch Cards
                     try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
                         solve_punch_cards(d_page)
                     except Exception as e:
                         _log_warning(f"Lỗi khi giải Punch Cards: {e}")
 
                     # Quét và cày toàn bộ Quests/Punch Cards lớn tại /earn
                     try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
                         solve_all_earn_quests(d_page)
                     except Exception as e:
                         _log_warning(f"Lỗi khi xử lý /earn Quests: {e}")
 
                     # Quét và giải các thẻ trong mục "Keep earning" tại /earn (đạt tối đa điểm 70/70)
                     try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
                         solve_keep_earning_activities(d_page, d_context)
                     except Exception as e:
                         _log_warning(f"Lỗi khi xử lý Keep Earning: {e}")
 
                     # Claim MSN Daily Gaming Tile (+10 đến +50 pts)
                     try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
                         claim_msn_daily_gaming_tile(d_page)
                     except Exception as e:
                         _log_warning(f"Lỗi khi quét Gaming Tile: {e}")
 
                     # Giải Bing Wallpaper Trivia (+10 đến +15 pts)
                     try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
                         solve_wallpaper_trivia(d_page)
                     except Exception as e:
                         _log_warning(f"Lỗi khi giải Wallpaper Trivia: {e}")
 
                     # Tương tác Copilot Chat (+5 đến +15 pts)
                     try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
                         interact_with_copilot(d_page, query="Tin tức hôm nay")
                     except Exception as e:
                         _log_warning(f"Lỗi khi tương tác Copilot: {e}")
 
                     # Quét Promotional & Newsletter Links (+20 đến +50 pts/tuần)
                     try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
                         solve_promotional_links(d_page)
                     except Exception as e:
                         _log_warning(f"Lỗi khi xử lý Promo Links: {e}")
@@ -653,14 +692,39 @@ def run_full_pipeline(
                         pass
 
                     # Kiểm tra lại tiến độ sau khi hoàn thành Activities (SCAN PHASE 2)
+                    if d_page is None or d_page.is_closed():
+                        d_context, d_page = ensure_desktop_page(d_context, p, headless)
                     post_progress = get_daily_search_progress(d_page)
-                    pc_cur = post_progress.get("pc_cur", 0)
-                    pc_max = post_progress.get("pc_max", 90)
-                    mob_cur = post_progress.get("mobile_cur", 0)
-                    mob_max = post_progress.get("mobile_max", 60)
-                    all_maxed = post_progress.get("all_maxed", False)
-                    all_activities_done = post_progress.get("all_activities_done", False)
-                    activities = post_progress.get("activities", {})
+                    sync_edge_browsing_from_progress(post_progress)
+
+                    if post_progress.get("scrape_error") or (
+                        not post_progress.get("found_pc")
+                        and not post_progress.get("found_mobile")
+                        and (verified_found_pc or verified_found_mob)
+                    ):
+                        _log_warning(
+                            f"[Scan Phase 2] Lỗi/Timeout khi đọc Dashboard. Giữ nguyên tiến độ hợp lệ từ Scan Phase 1: "
+                            f"Desktop {verified_pc_cur}/{verified_pc_max} | Mobile {verified_mob_cur}/{verified_mob_max}"
+                        )
+                        pc_cur = verified_pc_cur
+                        pc_max = verified_pc_max
+                        mob_cur = verified_mob_cur
+                        mob_max = verified_mob_max
+                        all_maxed = initial_progress.get("all_maxed", False)
+                        all_activities_done = initial_progress.get("all_activities_done", False)
+                        activities = initial_progress.get("activities", {})
+                    else:
+                        pc_cur = post_progress.get("pc_cur", 0)
+                        pc_max = post_progress.get("pc_max", 90)
+                        mob_cur = post_progress.get("mobile_cur", 0)
+                        mob_max = post_progress.get("mobile_max", 60)
+                        all_maxed = post_progress.get("all_maxed", False)
+                        all_activities_done = post_progress.get("all_activities_done", False)
+                        activities = post_progress.get("activities", {})
+                        if post_progress.get("found_pc"):
+                            verified_pc_cur, verified_pc_max, verified_found_pc = pc_cur, pc_max, True
+                        if post_progress.get("found_mobile"):
+                            verified_mob_cur, verified_mob_max, verified_found_mob = mob_cur, mob_max, True
 
                     # BƯỚC 3 Fallback: Kiểm tra lại thẻ Mobile App ở Pha Scan 2
                     primary_four_done = post_progress.get("primary_four_done", False) or (
@@ -873,7 +937,7 @@ def run_full_pipeline(
                                         m_context = None
 
                             # ---- 2.3 COOLDOWN CHECK ----
-                            # Nếu vẫn còn lượt cần tìm, kích hoạt cooldown 15 phút với Edge Browsing
+                            # Nếu vẫn còn lượt cần tìm, kích hoạt cooldown 15 phút (Edge Browsing giới hạn 30 phút/ngày)
                             if d_done < desktop_target or m_done < mobile_target:
                                 _log_info(f"Đã hoàn thành đợt: {batch_completed} lượt tìm kiếm.")
                                 _log_info(f"Tiến độ: Desktop {d_done}/{desktop_target} | Mobile {m_done}/{mobile_target}")
@@ -884,13 +948,46 @@ def run_full_pipeline(
                                 _log_info(f"[Cooldown] Bắt đầu nghỉ 15 phút. Dự kiến tiếp tục lúc: {resume_time.strftime('%H:%M:%S')}")
                                 update_session(d_done + m_done, None, "Cooldown 15 minutes")
 
-                                # Đảm bảo d_page sẵn sàng trước khi vào cooldown
+                                edge_state = get_edge_browsing_state()
+                                dash_edge_done = False
                                 try:
-                                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
-                                except Exception as e:
-                                    _log_warning(f"[Runner] Lỗi chuẩn bị Desktop page trước cooldown: {e}")
+                                    dash_edge_done = bool(
+                                        (post_progress.get("activities", {}) if "post_progress" in locals() else initial_progress.get("activities", {}))
+                                        .get("Edge Browsing", {})
+                                        .get("done", False)
+                                    )
+                                except Exception:
+                                    dash_edge_done = False
 
-                                d_page = active_edge_browsing_cooldown(d_page, total_seconds=cooldown)
+                                if dash_edge_done or edge_state["done"] or edge_state["seconds"] >= EDGE_BROWSING_CAP_SECONDS:
+                                    if dash_edge_done and not edge_state["done"]:
+                                        update_edge_browsing_state(EDGE_BROWSING_CAP_SECONDS, done=True)
+                                    _log_info("[Edge Browsing] Đã hoàn thành đủ 30/30 phút hôm nay. Bỏ qua duyệt web ngầm, nghỉ Cooldown thuần túy.")
+                                    if d_context:
+                                        try:
+                                            d_context.close()
+                                        except Exception:
+                                            pass
+                                        d_context = None
+                                        d_page = None
+                                    time.sleep(cooldown)
+                                else:
+                                    # Đảm bảo d_page sẵn sàng trước khi vào cooldown trên Desktop Edge context duy nhất
+                                    try:
+                                        d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                                    except Exception as e:
+                                        _log_warning(f"[Runner] Lỗi chuẩn bị Desktop page trước cooldown: {e}")
+
+                                    target_duration = min(cooldown, EDGE_BROWSING_CAP_SECONDS - edge_state["seconds"])
+                                    d_page, browsed_seconds = active_edge_browsing_cooldown(
+                                        d_page,
+                                        total_seconds=target_duration,
+                                        initial_seconds=edge_state["seconds"],
+                                    )
+                                    remaining_cooldown = cooldown - browsed_seconds
+                                    if remaining_cooldown > 0:
+                                        _log_info(f"[Edge Browsing] Đã chạm trần ngày, nghỉ phần Cooldown còn lại ({remaining_cooldown}s)...")
+                                        time.sleep(remaining_cooldown)
                                 _log_info("")
 
                         # Nếu là chạy test target tùy chỉnh (ví dụ --desktop-target 1 --mobile-target 0)
@@ -926,11 +1023,31 @@ def run_full_pipeline(
                                 pass
 
                         # Quét lại dữ liệu tiến độ thực tế
-                        re_check = get_daily_search_progress(d_page) if d_page else {}
+                        re_check = get_daily_search_progress(d_page) if d_page else {"found": False, "scrape_error": True}
+                        sync_edge_browsing_from_progress(re_check)
+
+                        if re_check.get("scrape_error") or (
+                            not re_check.get("found", False)
+                            and not re_check.get("found_pc")
+                            and not re_check.get("found_mobile")
+                        ):
+                            _log_warning(
+                                "[Double-Check] [!] Không thể đọc Dashboard (Timeout/Scrape Error). "
+                                f"Giữ nguyên bộ đếm đã xác minh: Desktop {verified_pc_cur}/{verified_pc_max} | "
+                                f"Mobile {verified_mob_cur}/{verified_mob_max} (không kết luận 100% maxed)."
+                            )
+                            all_maxed = False
+                            all_tasks_completed = False
+                            break
+
                         re_check_pc = re_check.get("pc_cur", 0)
                         pc_max = re_check.get("pc_max", 90)
                         re_check_mobile = re_check.get("mobile_cur", 0)
                         mobile_max = re_check.get("mobile_max", 60)
+                        if re_check.get("found_pc"):
+                            verified_pc_cur, verified_pc_max = re_check_pc, pc_max
+                        if re_check.get("found_mobile"):
+                            verified_mob_cur, verified_mob_max = re_check_mobile, mobile_max
                         all_maxed = re_check.get("all_maxed", False)
                         all_activities_done = re_check.get("all_activities_done", False)
                         re_act = re_check.get("activities", {})
@@ -949,8 +1066,8 @@ def run_full_pipeline(
 
                         _log_info(f"[Double-Check] Kết quả kiểm tra chéo: Desktop {re_check_pc}/{pc_max} | Mobile {re_check_mobile}/{mobile_max}")
 
-                        is_pc_maxed = (re_check_pc >= pc_max) if re_check.get("found_pc") else (d_done >= desktop_target)
-                        is_mob_maxed = (re_check_mobile >= mobile_max) if re_check.get("found_mobile") else (m_done >= mobile_target)
+                        is_pc_maxed = bool(re_check.get("found_pc") and re_check_pc >= pc_max)
+                        is_mob_maxed = bool(re_check.get("found_mobile") and re_check_mobile >= mobile_max)
 
                         if is_pc_maxed and is_mob_maxed:
                             all_maxed = True
@@ -1112,33 +1229,136 @@ REWARDS_MILESTONES = [
 ]
 
 
+def _read_lock_pid(lock_path: Path) -> str:
+    """Best-effort read of PID stored in runner.lock."""
+    try:
+        raw = lock_path.read_text(encoding="utf-8", errors="ignore").strip()
+        if not raw:
+            return "unknown"
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and data.get("pid"):
+                return str(data["pid"])
+        except Exception:
+            pass
+        for token in raw.replace(":", " ").replace("=", " ").split():
+            if token.isdigit():
+                return token
+    except Exception:
+        pass
+    return "unknown"
+
+
+def acquire_runner_lock(lock_path: Path = LOCK_FILE):
+    """
+    Acquire an exclusive non-blocking OS file lock at data/locks/runner.lock.
+    Returns open file handle on success, or None if another live instance holds the lock.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_path, "a+", encoding="utf-8")
+    try:
+        f.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        pid = _read_lock_pid(lock_path)
+        _log_info(
+            f"[Process Guard] Another bot instance (PID {pid}) is already running. "
+            "Exiting cleanly without killing active browsers."
+        )
+        try:
+            f.close()
+        except Exception:
+            pass
+        return None
+
+    try:
+        f.seek(0)
+        f.truncate(0)
+        f.write(json.dumps({
+            "pid": os.getpid(),
+            "started_at": datetime.datetime.now().isoformat(),
+        }))
+        f.flush()
+    except Exception:
+        pass
+    return f
+
+
+def release_runner_lock(lock_handle) -> None:
+    """Release and close the exclusive OS file lock."""
+    if lock_handle is None:
+        return
+    try:
+        lock_handle.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        lock_handle.close()
+    except Exception:
+        pass
+
+
+def is_sibling_runner_active() -> bool:
+    """Return True if another runner.py process is currently running."""
+    if not psutil:
+        return False
+    my_pid = os.getpid()
+    try:
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                pid = proc.info.get("pid")
+                if not pid or pid == my_pid:
+                    continue
+                name = (proc.info.get("name") or "").lower()
+                if name not in ("python.exe", "pythonw.exe", "python", "python3"):
+                    continue
+                cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+                if "runner.py" in cmdline:
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        pass
+    return False
+
+
 def cleanup_zombie_browsers():
     """
-    Tự động kiểm tra và đóng các tiến trình msedge.exe bị treo từ phiên trước
-    đang giữ khóa thư mục profiles/.
+    Tự động kiểm tra và đóng các tiến trình msedge.exe headless bị treo từ phiên trước
+    có --user-data-dir trỏ vào thư mục profiles/ của bot (tuyệt đối không chạm Edge của người dùng).
     """
-    _log_info("[Process Guard] Kiểm tra và dọn dẹp các tiến trình Edge treo...")
+    _log_info("[Process Guard] Kiểm tra và dọn dẹp các tiến trình Edge headless treo trong profiles/...")
     killed_count = 0
+    profiles_root = str((ROOT_DIR / "profiles").resolve()).lower().replace("/", "\\")
     try:
         if psutil:
-            for proc in psutil.process_iter(['pid', 'name']):
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
                     if proc.info['name'] and proc.info['name'].lower() == 'msedge.exe':
-                        proc.kill()
-                        killed_count += 1
+                        cmdline = " ".join(proc.info.get('cmdline') or []).lower().replace("/", "\\")
+                        if "--user-data-dir" in cmdline and profiles_root in cmdline:
+                            proc.kill()
+                            killed_count += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-        else:
-            res = subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if res.returncode == 0:
-                killed_count += 1
     except Exception as e:
         _log_debug(f"[Process Guard] Lỗi khi dọn tiến trình Edge: {e}")
 
     if killed_count > 0:
         _log_info(f"[Process Guard] Đã dọn dẹp {killed_count} tiến trình msedge.exe giải phóng khóa profiles.")
     else:
-        _log_info("[Process Guard] Không có tiến trình Edge nào bị treo.")
+        _log_info("[Process Guard] Không có tiến trình Edge bot nào bị treo.")
 
 
 def wait_for_internet(host: str = "www.bing.com", port: int = 443, timeout: int = 60) -> bool:
@@ -1179,6 +1399,69 @@ def is_today_already_completed() -> bool:
         return False
 
 
+def _load_daily_state_raw() -> dict:
+    if not DAILY_STATE_FILE.exists():
+        return {}
+    try:
+        with open(DAILY_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_edge_browsing_state(today_str: str = None) -> dict:
+    """Đọc tiến độ Edge Browsing hôm nay từ data/daily_state.json."""
+    today = today_str or datetime.date.today().isoformat()
+    data = _load_daily_state_raw()
+    if data.get("date") != today and data.get("completed_date") != today:
+        return {"date": today, "seconds": 0, "done": False}
+    return {
+        "date": today,
+        "seconds": int(data.get("edge_browsing_seconds", 0) or 0),
+        "done": bool(data.get("edge_browsing_done", False)),
+    }
+
+
+def update_edge_browsing_state(seconds: int, done: bool = False, today_str: str = None) -> None:
+    """Lưu tiến độ tích lũy Edge Browsing (giây & trạng thái hoàn thành) vào data/daily_state.json."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        today = today_str or datetime.date.today().isoformat()
+        now_iso = datetime.datetime.now().isoformat()
+        data = _load_daily_state_raw()
+        if data.get("date") != today and data.get("completed_date") != today:
+            state = {"completed_date": None, "completed_at": None, "status": "partial"}
+        else:
+            state = data
+
+        prev_secs = int(state.get("edge_browsing_seconds", 0) or 0)
+        new_secs = max(prev_secs, min(EDGE_BROWSING_CAP_SECONDS, int(seconds)))
+        is_done = bool(done or state.get("edge_browsing_done", False) or new_secs >= EDGE_BROWSING_CAP_SECONDS)
+        if is_done:
+            new_secs = max(new_secs, EDGE_BROWSING_CAP_SECONDS)
+
+        state.update({
+            "date": today,
+            "edge_browsing_seconds": new_secs,
+            "edge_browsing_done": is_done,
+            "updated_at": now_iso,
+        })
+        with open(DAILY_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        _log_warning(f"[Edge Browsing] Lỗi khi lưu tiến độ vào daily_state.json: {e}")
+
+
+def sync_edge_browsing_from_progress(progress: dict) -> None:
+    """Nếu Dashboard báo Edge Browsing đã 30/30 [✓], khóa ngay vào daily_state.json."""
+    if not isinstance(progress, dict):
+        return
+    edge_info = (progress.get("activities") or {}).get("Edge Browsing") or {}
+    if edge_info.get("done", False):
+        update_edge_browsing_state(EDGE_BROWSING_CAP_SECONDS, done=True)
+
+
 def save_daily_state(completed_date: str = None, partial: bool = False, checkin_awarded: int = 0):
     """
     Ghi nhận trạng thái ngày hiện tại vào data/daily_state.json.
@@ -1195,7 +1478,7 @@ def save_daily_state(completed_date: str = None, partial: bool = False, checkin_
             try:
                 with open(DAILY_STATE_FILE, "r", encoding="utf-8") as f:
                     existing = json.load(f)
-                if existing.get("completed_date") == today_str:
+                if existing.get("completed_date") == today_str or existing.get("date") == today_str:
                     state = existing
             except Exception:
                 pass
@@ -1204,6 +1487,8 @@ def save_daily_state(completed_date: str = None, partial: bool = False, checkin_
             "date": today_str,
             "partial": partial,
             "checkin_awarded": checkin_awarded,
+            "edge_browsing_seconds": int(state.get("edge_browsing_seconds", 0) or 0),
+            "edge_browsing_done": bool(state.get("edge_browsing_done", False)),
             "updated_at": now_iso,
         })
         if not partial:
@@ -1392,6 +1677,9 @@ def is_user_active(threshold_seconds: int = 120) -> bool:
 
 def put_pc_to_sleep():
     """Tự động đưa máy tính vào chế độ Sleep (S3) để tiết kiệm điện."""
+    if is_sibling_runner_active():
+        logger.info("[Auto-Sleep] Phát hiện phiên runner.py khác đang hoạt động. Hủy lệnh Sleep!")
+        return
     if is_user_active(threshold_seconds=120):
         logger.info("[Auto-Sleep] Phát hiện người dùng đang sử dụng máy tính. Hủy lệnh Sleep để không làm gián đoạn công việc!")
         return
@@ -1418,133 +1706,142 @@ def main():
     import os
     import psutil
 
-    # Đặt độ ưu tiên của tiến trình xuống mức Dưới Trung Bình (Below Normal)
-    try:
-        p = psutil.Process(os.getpid())
-        p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-    except Exception:
-        pass
+    lock_handle = acquire_runner_lock()
+    if lock_handle is None:
+        sys.exit(0)
 
     try:
-        cleanup_zombie_browsers()
-    except Exception:
-        pass
+        # Đặt độ ưu tiên của tiến trình xuống mức Dưới Trung Bình (Below Normal)
+        try:
+            p = psutil.Process(os.getpid())
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
 
-    parser = argparse.ArgumentParser(
-        description="MS Rewards Bot Phase 5 - Full Automation (Streak + Search + Logging)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        try:
+            cleanup_zombie_browsers()
+        except Exception:
+            pass
+
+        parser = argparse.ArgumentParser(
+            description="MS Rewards Bot Phase 5 - Full Automation (Streak + Search + Logging)",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
 Ví dụ sử dụng:
   python runner.py                    # Chạy mặc định (headless, 30D/20M, tự động Sleep khi hoàn tất)
   python runner.py --debug            # Chạy có giao diện (debug)
   python runner.py --no-sleep         # Chạy không tự động Sleep máy
   python runner.py --daemon           # Chạy nền liên tục (kiểm tra mỗi 4h)
   python runner.py --desktop-target 30 --mobile-target 20 --batch-size 4
-        """
-    )
-    parser.add_argument("--debug", action="store_true", 
-                        help="Chạy có giao diện trình duyệt (headless=False)")
-    parser.add_argument("--desktop-target", type=int, default=30,
-                        help="Số lượt tìm kiếm Desktop mục tiêu (mặc định: 30)")
-    parser.add_argument("--mobile-target", type=int, default=20,
-                        help="Số lượt tìm kiếm Mobile mục tiêu (mặc định: 20)")
-    parser.add_argument("--batch-size", type=int, default=3,
-                        help="Kích thước batch mỗi lần trước cooldown (mặc định: 3)")
-    parser.add_argument(
-        "--daemon", "--loop",
-        dest="daemon",
-        action="store_true", 
-        help="Chạy ở chế độ tiến trình nền liên tục, tự động ngủ 4 tiếng sau khi xong toàn bộ việc."
-    )
-    parser.add_argument(
-        "--interval", 
-        type=float, 
-        default=4, 
-        help="Khoảng thời gian ngủ giữa các chu kỳ kiểm tra (tính bằng giờ, mặc định 4h)."
-    )
-    parser.add_argument(
-        "--auto-sleep",
-        action="store_true",
-        default=True,
-        help="Tự động đưa máy tính vào chế độ Sleep khi hoàn thành tất cả nhiệm vụ (mặc định bật)."
-    )
-    parser.add_argument(
-        "--no-sleep",
-        dest="auto_sleep",
-        action="store_false",
-        help="Vô hiệu hóa tính năng tự động Sleep khi hoàn tất."
-    )
-    parser.add_argument(
-        "--retry-count",
-        type=int,
-        default=0,
-        help="Số lần thử lại trong ngày (mặc định 0)"
-    )
-    
-    args = parser.parse_args()
+            """
+        )
+        parser.add_argument("--debug", action="store_true", 
+                            help="Chạy có giao diện trình duyệt (headless=False)")
+        parser.add_argument("--desktop-target", type=int, default=30,
+                            help="Số lượt tìm kiếm Desktop mục tiêu (mặc định: 30)")
+        parser.add_argument("--mobile-target", type=int, default=20,
+                            help="Số lượt tìm kiếm Mobile mục tiêu (mặc định: 20)")
+        parser.add_argument("--batch-size", type=int, default=3,
+                            help="Kích thước batch mỗi lần trước cooldown (mặc định: 3)")
+        parser.add_argument(
+            "--daemon", "--loop",
+            dest="daemon",
+            action="store_true", 
+            help="Chạy ở chế độ tiến trình nền liên tục, tự động ngủ 4 tiếng sau khi xong toàn bộ việc."
+        )
+        parser.add_argument(
+            "--interval", 
+            type=float, 
+            default=4, 
+            help="Khoảng thời gian ngủ giữa các chu kỳ kiểm tra (tính bằng giờ, mặc định 4h)."
+        )
+        parser.add_argument(
+            "--auto-sleep",
+            action="store_true",
+            default=True,
+            help="Tự động đưa máy tính vào chế độ Sleep khi hoàn thành tất cả nhiệm vụ (mặc định bật)."
+        )
+        parser.add_argument(
+            "--no-sleep",
+            dest="auto_sleep",
+            action="store_false",
+            help="Vô hiệu hóa tính năng tự động Sleep khi hoàn tất."
+        )
+        parser.add_argument(
+            "--retry-count",
+            type=int,
+            default=0,
+            help="Số lần thử lại trong ngày (mặc định 0)"
+        )
+        
+        args = parser.parse_args()
 
-    check_interval_seconds = int(args.interval * 3600)
-    interval_display = f"{int(args.interval)}" if (isinstance(args.interval, int) or args.interval.is_integer()) else f"{args.interval}"
+        check_interval_seconds = int(args.interval * 3600)
+        interval_display = f"{int(args.interval)}" if (isinstance(args.interval, int) or args.interval.is_integer()) else f"{args.interval}"
 
-    all_completed = False
-    try:
-        while True:
-            logger.info("============================================================")
-            logger.info(f"   BẮT ĐẦU CHU KỲ KIỂM TRA & CÀY ĐIỂM: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info("============================================================")
-            
-            # Thực thi toàn bộ pipeline
-            all_completed = run_full_pipeline(args)
-
-            # Nếu không bật cờ --daemon, chạy xong 1 phiên thì thoát như cũ
-            if not args.daemon:
-                break
-
-            # Nếu bật cờ --daemon:
-            wake_time = datetime.datetime.now() + datetime.timedelta(seconds=check_interval_seconds)
-            wake_str = wake_time.strftime("%H:%M:%S ngày %d/%m/%Y")
-
-            if all_completed:
+        all_completed = False
+        try:
+            while True:
                 logger.info("============================================================")
-                logger.info("  [✓] TOÀN BỘ NHIỆM VỤ ĐÃ HOÀN TẤT XUẤT SẮC!")
-                logger.info("  [*] Đã đóng toàn bộ trình duyệt để giải phóng 100% RAM/GPU.")
-                logger.info(f"  [*] Bot chuyển sang chế độ ngủ sâu. Sẽ kiểm tra lại lúc: {wake_str} (sau {interval_display}h)")
-                logger.info("============================================================\n")
-            else:
-                logger.info(f"[*] Chưa đạt hết chỉ tiêu, tạm nghỉ {interval_display}h và sẽ thử lại lúc: {wake_str}\n")
+                logger.info(f"   BẮT ĐẦU CHU KỲ KIỂM TRA & CÀY ĐIỂM: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info("============================================================")
+                
+                # Thực thi toàn bộ pipeline
+                all_completed = run_full_pipeline(args)
 
-            # Ngủ tiết kiệm tài nguyên (chia nhỏ 60s để phản hồi tốt nếu có lệnh ngắt)
-            start_sleep = time.time()
-            if check_interval_seconds > 0:
-                while time.time() - start_sleep < check_interval_seconds:
-                    time.sleep(min(60, check_interval_seconds - (time.time() - start_sleep)))
-            else:
-                time.sleep(1)
+                # Nếu không bật cờ --daemon, chạy xong 1 phiên thì thoát như cũ
+                if not args.daemon:
+                    break
 
-    except KeyboardInterrupt:
-        logger.info("\nNhận tín hiệu dừng (Ctrl+C). Đang tắt bot...")
-        try:
-            cleanup_zombie_browsers()
-        except Exception:
-            pass
-        try:
-            purge_browser_cache()
-        except Exception:
-            pass
+                # Nếu bật cờ --daemon:
+                wake_time = datetime.datetime.now() + datetime.timedelta(seconds=check_interval_seconds)
+                wake_str = wake_time.strftime("%H:%M:%S ngày %d/%m/%Y")
+
+                if all_completed:
+                    logger.info("============================================================")
+                    logger.info("  [✓] TOÀN BỘ NHIỆM VỤ ĐÃ HOÀN TẤT XUẤT SẮC!")
+                    logger.info("  [*] Đã đóng toàn bộ trình duyệt để giải phóng 100% RAM/GPU.")
+                    logger.info(f"  [*] Bot chuyển sang chế độ ngủ sâu. Sẽ kiểm tra lại lúc: {wake_str} (sau {interval_display}h)")
+                    logger.info("============================================================\n")
+                else:
+                    logger.info(f"[*] Chưa đạt hết chỉ tiêu, tạm nghỉ {interval_display}h và sẽ thử lại lúc: {wake_str}\n")
+
+                # Ngủ tiết kiệm tài nguyên (chia nhỏ 60s để phản hồi tốt nếu có lệnh ngắt)
+                start_sleep = time.time()
+                if check_interval_seconds > 0:
+                    while time.time() - start_sleep < check_interval_seconds:
+                        time.sleep(min(60, check_interval_seconds - (time.time() - start_sleep)))
+                else:
+                    time.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("\nNhận tín hiệu dừng (Ctrl+C). Đang tắt bot...")
+            try:
+                cleanup_zombie_browsers()
+            except Exception:
+                pass
+            try:
+                purge_browser_cache()
+            except Exception:
+                pass
+            sys.exit(0)
+
+        if all_completed and getattr(args, "auto_sleep", False):
+            if is_sibling_runner_active():
+                logger.info("[Auto-Sleep] Phát hiện phiên runner.py khác đang hoạt động. Hủy lệnh Sleep!")
+            elif is_user_active(threshold_seconds=120):
+                logger.info("[Auto-Sleep] Phát hiện người dùng đang sử dụng máy tính. Hủy lệnh Sleep để không làm gián đoạn công việc!")
+            else:
+                logger.info("[Auto-Sleep] Máy tính đang ở trạng thái không người dùng. Chuẩn bị đưa máy vào chế độ Sleep...")
+                put_pc_to_sleep()
+
+        # Nếu pipeline chạy trọn vẹn (dù còn thẻ phụ chờ chu kỳ sau cày tiếp), luôn exit 0 để script .bat không bị treo
+        all_activities_done = all_completed
+        if not all_activities_done:
+            _log_info("[Runner] Còn hoạt động phụ chưa đạt 100%, bot sẽ tiếp tục ở chu kỳ kế tiếp.")
         sys.exit(0)
-
-    if all_completed and getattr(args, "auto_sleep", False):
-        if is_user_active(threshold_seconds=120):
-            logger.info("[Auto-Sleep] Phát hiện người dùng đang sử dụng máy tính. Hủy lệnh Sleep để không làm gián đoạn công việc!")
-        else:
-            logger.info("[Auto-Sleep] Máy tính đang ở trạng thái không người dùng. Chuẩn bị đưa máy vào chế độ Sleep...")
-            put_pc_to_sleep()
-
-    # Nếu pipeline chạy trọn vẹn (dù còn thẻ phụ chờ chu kỳ sau cày tiếp), luôn exit 0 để script .bat không bị treo
-    all_activities_done = all_completed
-    if not all_activities_done:
-        _log_info("[Runner] Còn hoạt động phụ chưa đạt 100%, bot sẽ tiếp tục ở chu kỳ kế tiếp.")
-    sys.exit(0)
+    finally:
+        release_runner_lock(lock_handle)
 
 
 if __name__ == "__main__":

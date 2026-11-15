@@ -81,11 +81,14 @@ def extract_current_points(page: Page) -> int:
 
     selectors = [
         "#id_rc",                    # Số điểm trên thanh header Bing Search
+        "#flyout_id_rc",             # Mobile Bing Rewards points
+        ".b_id_rc",
         "#rh_meter",
         "[id*='reward_points']",
         "span[class*='pointsValue']",
         "header div[class*='points']",
         "button[aria-label*='points' i]",
+        "#b_header [aria-label*='Rewards' i]",
         "header button:has(img[src*='Medals'])",
         "header button:has(img[alt='Member'])",
         "#flyout-points"
@@ -93,8 +96,13 @@ def extract_current_points(page: Page) -> int:
     for sel in selectors:
         try:
             elem = page.locator(sel).first
-            if elem.is_visible(timeout=1000):
-                text = elem.inner_text().strip()
+            if elem.count() > 0:
+                visible = False
+                try:
+                    visible = elem.is_visible(timeout=500)
+                except Exception:
+                    visible = False
+                text = (elem.inner_text() if visible else (elem.text_content() or "")).strip()
                 if not text:
                     text = elem.get_attribute("aria-label") or elem.get_attribute("title") or ""
                 # Loại bỏ dấu phẩy/chấm phân tách hàng nghìn (ví dụ: 1,250 -> 1250)

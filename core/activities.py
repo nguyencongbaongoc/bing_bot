@@ -273,19 +273,30 @@ def tap_corner_rewards_coin(page: Page, context_name: str = "PC") -> bool:
 
             page.wait_for_timeout(2000)
 
-            # 2. Sau khi chạm đồng xu ở góc, kiểm tra các iframe flyout vừa bung ra để bấm nhận xu bên trong
+            # 2. Sau khi chạm đồng xu ở góc, kiểm tra các iframe flyout vừa bung ra để bấm nhận xu bên trong (tối đa 2 lượt/batch)
+            flyout_clicks = 0
+            max_flyout_clicks = 2
             for frame in page.frames:
+                if flyout_clicks >= max_flyout_clicks:
+                    break
                 f_url = frame.url.lower()
                 if "panelflyout" in f_url or "rewards" in f_url:
                     try:
                         # Tìm các nút nhận điểm (+5, +10, Claim) bên trong khung đồng xu
                         claim_btns = frame.locator('button:has-text("Claim"), a:has-text("Claim"), [class*="claim" i], [aria-label*="Claim" i]')
-                        for i in range(min(claim_btns.count(), 5)):
+                        total_btns = claim_btns.count()
+                        if total_btns == 0:
+                            continue
+                        for i in range(total_btns):
+                            if flyout_clicks >= max_flyout_clicks:
+                                break
                             btn = claim_btns.nth(i)
-                            if btn.is_visible(timeout=800):
-                                btn.click(force=True, timeout=2000)
-                                logger.info(f"[{context_name} Coin] -> Đã thu thập xu thưởng bên trong Flyout!")
-                                page.wait_for_timeout(1000)
+                            if not btn.is_visible(timeout=800):
+                                break
+                            btn.click(force=True, timeout=2000)
+                            flyout_clicks += 1
+                            logger.info(f"[{context_name} Coin] -> Đã thu thập xu thưởng bên trong Flyout ({flyout_clicks}/{max_flyout_clicks})!")
+                            page.wait_for_timeout(1000)
                     except Exception:
                         pass
 
@@ -2205,8 +2216,8 @@ def handle_visual_search_streak(page: Page) -> bool:
                     logger.info(f"   [*] Click nút Browse ({browse_sel}) và dùng expect_file_chooser...")
                     try:
                         with target_page.expect_file_chooser(timeout=5000) as fc_info:
-                            # Use JavaScript click for elements that are not "visible" to Playwright
-                            target_page.evaluate(f'document.querySelector("{browse_sel}").click()')
+                            # Use Patchright native locator click (safe for :has-text and Vietnamese selectors)
+                            browse_btn.click(force=True, timeout=3000)
                         file_chooser = fc_info.value
                         file_chooser.set_files(str(upload_img_path))
                         upload_success = True
@@ -2257,6 +2268,9 @@ def handle_visual_search_streak(page: Page) -> bool:
             
             def is_valid_result_url(url: str) -> bool:
                 url_lower = url.lower()
+                # Accept Bing's redirect to explore.microsoft.com/.../bing/visual-search/ alongside view=detailv2
+                if "explore.microsoft.com" in url_lower and "visual-search" in url_lower:
+                    return True
                 # Valid visual search result URLs have view=detailv2 (or detailV2) and a visual search FORM code
                 has_detailv2 = "view=detailv2" in url_lower
                 has_visual_form = any(f in url_lower for f in [
@@ -2504,19 +2518,42 @@ def get_daily_search_progress(page: Page) -> dict:
     progress = {
         "pc_cur": 0, "pc_current": 0, "pc_max": 90,
         "mobile_cur": 0, "mobile_current": 0, "mobile_max": 60,
+        "found": False,
         "found_pc": False,
         "found_mobile": False,
+        "scrape_error": False,
         "all_maxed": False,
         "activities": {},
         "all_activities_done": False
     }
 
     try:
-        # Bước A: Điều hướng tới https://rewards.bing.com/earn (nơi hiển thị cả Streaks và Points breakdown)
-        if "rewards.bing.com/earn" not in page.url:
-            page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=20000)
-        else:
-            page.reload(wait_until="domcontentloaded", timeout=20000)
+        # Bước A: Điều hướng tới https://rewards.bing.com/earn (retry tối đa 3 lần khi TimeoutError)
+        nav_ok = False
+        last_nav_err = None
+        for nav_attempt in range(1, 4):
+            try:
+                if "rewards.bing.com/earn" not in page.url:
+                    page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=25000)
+                else:
+                    page.reload(wait_until="domcontentloaded", timeout=25000)
+                nav_ok = True
+                break
+            except Exception as nav_err:
+                last_nav_err = nav_err
+                logger.warning(f"[Dashboard] Lỗi tải /earn (lần {nav_attempt}/3): {nav_err}")
+                if nav_attempt < 3:
+                    try:
+                        page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+
+        if not nav_ok:
+            logger.warning(f"[Dashboard] Không thể tải /earn sau 3 lần thử: {last_nav_err}")
+            progress["found"] = False
+            progress["scrape_error"] = True
+            return progress
+
         page.wait_for_timeout(2500)
         dismiss_popups(page)
 
@@ -2748,6 +2785,7 @@ def get_daily_search_progress(page: Page) -> dict:
         progress["bing_star_bonus"] = star_bonus
 
         # CHỈ COI LÀ ALL_MAXED KHI VÀ CHỈ KHI DỮ LIỆU THỰC TẾ XÁC NHẬN CẢ PC VÀ MOBILE ĐÃ ĐẠT ĐỈNH
+        progress["found"] = bool(progress["found_pc"] or progress["found_mobile"])
         if progress["found_pc"] and progress["found_mobile"]:
             if progress["pc_cur"] >= progress["pc_max"] and progress["mobile_cur"] >= progress["mobile_max"]:
                 progress["all_maxed"] = True
@@ -2756,6 +2794,9 @@ def get_daily_search_progress(page: Page) -> dict:
 
     except Exception as e:
         logger.warning(f"[Dashboard] Lỗi khi kiểm tra tiến độ ngày: {e}")
+        progress["found"] = False
+        progress["scrape_error"] = True
+        progress["all_maxed"] = False
 
     return progress
 
