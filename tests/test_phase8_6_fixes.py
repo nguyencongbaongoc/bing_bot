@@ -107,9 +107,7 @@ class TestPhase86Fixes(unittest.TestCase):
             is_valid_visual_search_result("https://explore.microsoft.com/en-us/bing/visual-search")
         )
         self.assertFalse(
-            is_valid_visual_search_result(
-                "https://www.bing.com/images/search?view=detailv2&FORM=IMVNXT&imgurl=https://images.pexels.com/photos/975771/pexels-photo-975771.jpeg"
-            )
+            is_valid_visual_search_result("https://www.bing.com/images?FORM=SBIVSP")
         )
         self.assertFalse(
             is_valid_visual_search_result("https://www.bing.com/images?FORM=SBIRDI")
@@ -130,6 +128,11 @@ class TestPhase86Fixes(unittest.TestCase):
         )
         self.assertTrue(
             is_valid_visual_search_result("https://www.bing.com/images/search?bcid=xyz999")
+        )
+        self.assertTrue(
+            is_valid_visual_search_result(
+                "https://www.bing.com/images/search?view=detailV2&ccid=1ocLq3vE&FORM=IMVNXT&idpview=singleimage"
+            )
         )
         vs_insights_page = MagicMock()
         vs_insights_loc = MagicMock()
@@ -393,18 +396,19 @@ class TestPhase86Fixes(unittest.TestCase):
 
             vs_tab.goto.side_effect = vs_goto
 
-            # Main page has no Visual Search card -> falls back to bing.com/visualsearch?FORM=VSMAGC
+            # Main page has no Visual Search card -> falls back to bing.com/images?FORM=SBIVSP
             no_loc = MagicMock()
             no_loc.first = MagicMock()
             no_loc.first.count.return_value = 0
             no_loc.first.is_visible.return_value = False
             main_page.locator.return_value = no_loc
 
-            # On vs_tab: dropzone initially hidden, #sb_sbip is present and clicking it mounts #sbi_b,
-            # and #sbi_b #sb_brs triggers expect_file_chooser(timeout=6000) transitioning URL to iss=sbiupload.
+            # On vs_tab: dropzone initially hidden, #sb_sbip is present and clicking it mounts #sb_sbipane,
+            # and #sb_sbipane #sb_brtext triggers expect_file_chooser(timeout=6000) transitioning URL to iss=sbiupload.
             dropzone_mounted = {"ready": False}
             sb_sbip_elem = MagicMock()
             sb_sbip_elem.count.return_value = 1
+            sb_sbip_elem.is_visible.return_value = True
 
             def click_sb_sbip(timeout=None, force=False):
                 dropzone_mounted["ready"] = True
@@ -427,9 +431,9 @@ class TestPhase86Fixes(unittest.TestCase):
                 loc = MagicMock()
                 if sel == "#sb_sbip":
                     loc.first = sb_sbip_elem
-                elif sel == '#sbi_b, label[for="sb_fileinput"], #sb_brs':
+                elif sel == '#sb_sbipane, #sb_brtext, label[for="sb_fileinput"], #sb_brs':
                     loc.first = dropzone_elem
-                elif sel == "#sbi_b #sb_brs":
+                elif sel == "#sb_sbipane #sb_brtext":
                     loc.first = browse_elem
                 else:
                     loc.first = hidden_elem
@@ -468,13 +472,13 @@ class TestPhase86Fixes(unittest.TestCase):
 
             self.assertTrue(ok)
             vs_tab.goto.assert_called_once_with(
-                "https://www.bing.com/visualsearch?FORM=VSMAGC",
+                "https://www.bing.com/images?FORM=SBIVSP",
                 wait_until="domcontentloaded",
                 timeout=15000,
             )
             sb_sbip_elem.click.assert_called_once()
             vs_tab.wait_for_selector.assert_called_once_with(
-                '#sbi_b, label[for="sb_fileinput"], #sb_brs',
+                '#sb_sbipane, #sb_brtext, label[for="sb_fileinput"], #sb_brs',
                 state="visible",
                 timeout=5000,
             )

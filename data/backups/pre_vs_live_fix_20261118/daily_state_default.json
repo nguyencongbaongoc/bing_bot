@@ -1,0 +1,20 @@
+{
+  "completed_date": null,
+  "completed_at": null,
+  "status": "partial",
+  "edge_browsing_seconds": 1860,
+  "edge_browsing_done": true,
+  "searches_completed_today": true,
+  "core_tasks_done": false,
+  "visual_search_attempts_today": 3,
+  "mobile_checkin_done": true,
+  "alerts_sent": {
+    "milestone_1500": "2026-11-18"
+  },
+  "consecutive_failures": 0,
+  "account_id": "default",
+  "date": "2026-11-18",
+  "updated_at": "2026-11-18T10:04:26.526640",
+  "partial": true,
+  "checkin_awarded": 50
+}
