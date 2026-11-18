@@ -148,10 +148,30 @@ def smooth_scroll(page: Page, y_px: int, is_mobile: bool = False):
         pass
 
 
+def _organic_read_scroll(target_page: Page, dwell: float, is_mobile: bool = False):
+    """
+    Thực hiện 2-3 lượt cuộn đọc tự nhiên với tốc độ/khoảng nghỉ biến thiên
+    (bao gồm thi thoảng cuộn ngược nhẹ lên trên để đọc lại) trong thời gian dwell.
+    """
+    scroll_count = random.randint(2, 3)
+    weights = [random.uniform(0.6, 1.4) for _ in range(scroll_count + 1)]
+    total_w = sum(weights)
+    slices = [dwell * (w / total_w) for w in weights]
+
+    for idx in range(scroll_count):
+        time.sleep(slices[idx])
+        if idx > 0 and random.random() < 0.25:
+            delta_y = -random.randint(70, 160)
+        else:
+            delta_y = random.randint(180, 440)
+        smooth_scroll(target_page, delta_y, is_mobile=is_mobile)
+    time.sleep(slices[-1])
+
+
 def simulate_organic_click(page: Page, is_mobile: bool = False):
     """
     Mô phỏng người dùng click vào một kết quả tìm kiếm tự nhiên (Organic CTR ~55%).
-    Đọc trang 5.5 - 11.0 giây (Dwell time), cuộn chuột 1-2 lần trên trang đích rồi quay lại hoặc đóng tab.
+    Đọc trang 5.5 - 11.0 giây (Dwell time), cuộn chuột 2-3 lần biến thiên trên trang đích rồi quay lại hoặc đóng tab.
     """
     try:
         results = page.locator("#b_results h2 a, #b_results .b_algo a")
@@ -178,9 +198,9 @@ def simulate_organic_click(page: Page, is_mobile: bool = False):
         initial_pages = list(page.context.pages)
         new_page = None
 
-        # Bắt sự kiện nếu link mở ra tab mới
+        # Bắt sự kiện nếu link mở ra tab mới qua context.expect_page(timeout=3000)
         try:
-            with page.expect_popup(timeout=2500) as popup_info:
+            with page.context.expect_page(timeout=3000) as new_page_info:
                 box = target.bounding_box()
                 if box and not is_mobile:
                     tx = box["x"] + box["width"] * random.uniform(0.2, 0.8)
@@ -190,7 +210,7 @@ def simulate_organic_click(page: Page, is_mobile: bool = False):
                     page.mouse.click(tx, ty)
                 else:
                     target.click(timeout=3000)
-            new_page = popup_info.value
+            new_page = new_page_info.value
         except Exception:
             pass
 
@@ -208,10 +228,7 @@ def simulate_organic_click(page: Page, is_mobile: bool = False):
             except Exception:
                 pass
             logger.info(f"[Stealth CTR] Dừng đọc tab mới trong {dwell:.1f}s (Dwell time)...")
-            scroll_count = random.randint(1, 2)
-            for _ in range(scroll_count):
-                time.sleep(dwell / (scroll_count + 1))
-                smooth_scroll(new_page, random.randint(180, 400), is_mobile=is_mobile)
+            _organic_read_scroll(new_page, dwell, is_mobile=is_mobile)
             time.sleep(1.0)
             try:
                 new_page.close()
@@ -220,16 +237,13 @@ def simulate_organic_click(page: Page, is_mobile: bool = False):
         else:
             # Trường hợp mở ngay trong tab hiện tại
             logger.info(f"[Stealth CTR] Dừng đọc trang đích trong {dwell:.1f}s (Dwell time)...")
-            scroll_count = random.randint(1, 2)
-            for _ in range(scroll_count):
-                time.sleep(dwell / (scroll_count + 1))
-                smooth_scroll(page, random.randint(180, 400), is_mobile=is_mobile)
+            _organic_read_scroll(page, dwell, is_mobile=is_mobile)
             time.sleep(1.0)
             try:
                 target_back_url = serp_url if (serp_url and serp_url.startswith("http")) else "https://www.bing.com"
                 if page.url != target_back_url:
                     logger.debug(f"[Stealth CTR] Quay về trang kết quả tìm kiếm: {target_back_url[:60]}...")
-                    page.goto(target_back_url, wait_until="domcontentloaded", timeout=10000)
+                    page.goto(target_back_url, wait_until="domcontentloaded", timeout=12000)
                 page.wait_for_timeout(random.randint(800, 1500))
             except Exception as e:
                 logger.debug(f"[Stealth CTR] Không thể quay về SERP, tải lại Bing: {e}")
@@ -288,6 +302,57 @@ def _perform_post_search_dwell_and_ctr(page: Page, is_mobile: bool = False):
         logger.debug(f"[Post-Search] Lỗi tương tác sau tìm kiếm: {e}")
 
 
+RELATED_DISALLOWED_PATHS = ("/images/", "/videos/", "/maps", "/news", "/shop")
+RELATED_DISALLOWED_LABELS = (
+    "xem tất cả",
+    "bản đồ",
+    "video của",
+    "hình ảnh",
+    "see all",
+    "more images",
+)
+
+
+def _is_page_crash_or_closed_error(err: Exception) -> bool:
+    err_name = type(err).__name__.lower()
+    err_msg = str(err).lower()
+    return (
+        "page crashed" in err_msg
+        or "targetclosed" in err_name
+        or "targetclosederror" in err_msg
+        or "target page, context or browser has been closed" in err_msg
+        or "browser has been closed" in err_msg
+    )
+
+
+def is_valid_related_search_link(href: str, text: str) -> bool:
+    """
+    Chỉ cho phép link Web SERP thực sự (/search?q=... hoặc https://www.bing.com/search?q=...).
+    Loại bỏ các liên kết /images/, /videos/, /maps, /news, /shop và nhãn điều hướng UI.
+    """
+    href_clean = (href or "").strip()
+    href_lower = href_clean.lower()
+    text_clean = (text or "").strip()
+    text_lower = text_clean.lower()
+
+    if not text_clean or len(text_clean) <= 2 or "\n" in text_clean:
+        return False
+
+    if any(label in text_lower for label in RELATED_DISALLOWED_LABELS):
+        return False
+
+    if any(path in href_lower for path in RELATED_DISALLOWED_PATHS):
+        return False
+
+    if not (
+        href_lower.startswith("/search?q=")
+        or href_lower.startswith("https://www.bing.com/search?q=")
+    ):
+        return False
+
+    return True
+
+
 def perform_related_cluster_search(page: Page, is_mobile: bool = False) -> str:
     """
     Chế độ 1: Chain từ Related Searches (30% cơ hội nếu đang ở trang kết quả Bing).
@@ -322,17 +387,26 @@ def perform_related_cluster_search(page: Page, is_mobile: bool = False) -> str:
             try:
                 links = page.locator(sel).all()
                 for link in links:
-                    if link.is_visible():
-                        txt = link.inner_text().strip()
-                        if txt and len(txt) > 2 and "\n" not in txt:
+                    try:
+                        if not link.is_visible():
+                            continue
+                        txt = (link.inner_text() or "").strip()
+                        href = (link.get_attribute("href") or "").strip()
+                        if is_valid_related_search_link(href, txt):
                             found_links.append((link, txt))
-            except Exception:
+                    except Exception as inner_e:
+                        if _is_page_crash_or_closed_error(inner_e):
+                            raise
+                        continue
+            except Exception as sel_e:
+                if _is_page_crash_or_closed_error(sel_e):
+                    raise
                 continue
             if found_links:
                 break
 
         if not found_links:
-            logger.debug("[Related Searches] Không tìm thấy link tìm kiếm liên quan trên trang hiện tại.")
+            logger.debug("[Related Searches] Không tìm thấy link tìm kiếm liên quan hợp lệ trên trang hiện tại.")
             return None
 
         target_link, related_keyword = random.choice(found_links[:5])
@@ -376,8 +450,61 @@ def perform_related_cluster_search(page: Page, is_mobile: bool = False) -> str:
 
         return related_keyword
     except Exception as e:
+        if _is_page_crash_or_closed_error(e):
+            raise
         logger.debug(f"[Related Searches] Lỗi: {e}")
         return None
+
+
+QWERTY_ADJACENT = {
+    "a": "qwsz", "b": "vghn", "c": "xdfv", "d": "serfcx", "e": "wsdr",
+    "f": "drtgvc", "g": "ftyhbv", "h": "gyujnb", "i": "ujko", "j": "huikmn",
+    "k": "jiolm", "l": "kop", "m": "njk", "n": "bhjm", "o": "iklp",
+    "p": "ol", "q": "wa", "r": "edft", "s": "awedxz", "t": "rfgy",
+    "u": "yhji", "v": "cfgb", "w": "qase", "x": "zsdc", "y": "tghu",
+    "z": "asx",
+}
+
+
+def get_adjacent_qwerty_char(ch: str) -> str:
+    """Trả về một phím lân cận trên bàn phím QWERTY cho ký tự chữ cái."""
+    lower_ch = ch.lower()
+    neighbors = QWERTY_ADJACENT.get(lower_ch)
+    if not neighbors:
+        return ch
+    picked = random.choice(neighbors)
+    return picked.upper() if ch.isupper() else picked
+
+
+def biometric_type_text(page: Page, text: str, typo_prob: float = 0.08) -> None:
+    """
+    Gõ văn bản với nhịp độ sinh trắc học (Biometric Keystroke Dynamics):
+    - Trong cùng một từ (intra-word burst): 35-75ms mỗi phím.
+    - Tại ranh giới từ (dấu cách): dừng nhẹ 140-260ms.
+    - ~8% xác suất gõ nhầm 1 phím QWERTY lân cận, dừng 180-320ms, bấm Backspace và gõ lại đúng ký tự.
+    """
+    if not text:
+        return
+
+    candidate_indices = [
+        idx for idx, ch in enumerate(text)
+        if 1 <= idx < len(text) - 1 and ch.lower() in QWERTY_ADJACENT
+    ]
+    typo_idx = -1
+    if candidate_indices and len(text) > 4 and random.random() < typo_prob:
+        typo_idx = random.choice(candidate_indices)
+
+    for idx, ch in enumerate(text):
+        if idx == typo_idx:
+            wrong_ch = get_adjacent_qwerty_char(ch)
+            page.keyboard.type(wrong_ch, delay=random.randint(35, 75))
+            page.wait_for_timeout(random.randint(180, 320))
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(random.randint(50, 120))
+
+        page.keyboard.type(ch, delay=random.randint(35, 75))
+        if ch == " ":
+            page.wait_for_timeout(random.randint(140, 260))
 
 
 def human_type_and_search(page: Page, keyword: str, is_mobile: bool = False) -> bool:
@@ -431,22 +558,43 @@ def human_type_and_search(page: Page, keyword: str, is_mobile: bool = False) -> 
             except Exception:
                 pass
 
-        # 2. Tìm ô nhập liệu tìm kiếm
+        # 2. Tìm ô nhập liệu tìm kiếm (#sb_form_q visible trong 8000ms, reload Bing 1 lần nếu timeout)
         search_box = None
-        for sel in search_selectors:
-            loc = page.locator(sel).first
-            if loc.count() > 0 and loc.is_visible():
-                search_box = loc
-                break
-
-        if search_box is None:
-            page.goto("https://www.bing.com", wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(1500)
-            for sel in search_selectors:
-                loc = page.locator(sel).first
-                if loc.count() > 0 and loc.is_visible():
-                    search_box = loc
-                    break
+        try:
+            sb_q = page.locator("#sb_form_q").first
+            sb_q.wait_for(state="visible", timeout=8000)
+            search_box = sb_q
+        except Exception as wait_exc:
+            if _is_page_crash_or_closed_error(wait_exc):
+                raise
+            logger.debug("[Search Input] #sb_form_q chưa hiển thị sau 8s, tải lại https://www.bing.com/ ...")
+            try:
+                page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(1200)
+                for accept_sel in ['#bnp_btn_accept', 'button:has-text("Accept")', 'button:has-text("Chấp nhận")']:
+                    try:
+                        btn = page.locator(accept_sel).first
+                        if btn.count() > 0 and btn.is_visible(timeout=500):
+                            btn.click(timeout=2000)
+                            page.wait_for_timeout(400)
+                    except Exception:
+                        pass
+                sb_q = page.locator("#sb_form_q").first
+                sb_q.wait_for(state="visible", timeout=8000)
+                search_box = sb_q
+            except Exception as reload_exc:
+                if _is_page_crash_or_closed_error(reload_exc):
+                    raise
+                for sel in search_selectors:
+                    try:
+                        loc = page.locator(sel).first
+                        if loc.count() > 0 and loc.is_visible():
+                            search_box = loc
+                            break
+                    except Exception as sel_exc:
+                        if _is_page_crash_or_closed_error(sel_exc):
+                            raise
+                        continue
 
         if search_box is None:
             # Fallback cực hạn: nếu hoàn toàn không tìm thấy ô input
@@ -497,12 +645,8 @@ def human_type_and_search(page: Page, keyword: str, is_mobile: bool = False) -> 
             logger.info("[Organic Search] Chế độ 2: Autocomplete Selection (30% tỷ lệ)...")
             cutoff = max(2, int(len(keyword) * random.uniform(0.60, 0.70)))
 
-            # Gõ N ký tự đầu tiên với độ trễ biến thiên 0.08 - 0.22s/ký tự
-            for ch in keyword[:cutoff]:
-                delay_sec = random.uniform(0.08, 0.22)
-                page.keyboard.type(ch, delay=int(delay_sec * 1000))
-                if ch == " ":
-                    page.wait_for_timeout(random.randint(120, 250))
+            # Gõ N ký tự đầu tiên với nhịp độ sinh trắc học (35-75ms intra-word, 140-260ms word boundary)
+            biometric_type_text(page, keyword[:cutoff], typo_prob=0.08)
 
             # Đợi 0.8 - 1.4s cho dropdown gợi ý #sa_ul li xuất hiện
             pause_wait = random.uniform(0.8, 1.4)
@@ -542,11 +686,7 @@ def human_type_and_search(page: Page, keyword: str, is_mobile: bool = False) -> 
 
             if not autocomplete_clicked:
                 logger.debug("[Mode 2: Autocomplete] Gợi ý không hiện, gõ nốt phần từ khóa còn lại...")
-                for ch in keyword[cutoff:]:
-                    delay_sec = random.uniform(0.08, 0.22)
-                    page.keyboard.type(ch, delay=int(delay_sec * 1000))
-                    if ch == " ":
-                        page.wait_for_timeout(random.randint(120, 250))
+                biometric_type_text(page, keyword[cutoff:], typo_prob=0.0)
                 page.wait_for_timeout(int(random.uniform(0.4, 0.8) * 1000))
                 page.keyboard.press("Enter")
                 save_searched_keyword(keyword)
@@ -554,22 +694,7 @@ def human_type_and_search(page: Page, keyword: str, is_mobile: bool = False) -> 
         # ===== CHẾ ĐỘ 3: Gõ tự nhiên toàn bộ từ khóa (40% cơ hội) =====
         else:
             logger.info("[Organic Search] Chế độ 3: Natural Full Typing (40% tỷ lệ)...")
-            # 5% xác suất gõ nhầm 1 phím rồi bấm Backspace sửa lại
-            has_typo = (random.random() < 0.05 and len(keyword) > 4)
-            typo_idx = random.randint(2, len(keyword) - 2) if has_typo else -1
-
-            for idx, ch in enumerate(keyword):
-                if idx == typo_idx and ch.isalpha():
-                    typo_char = random.choice("abcdefghijklmnopqrstuvwxyz")
-                    page.keyboard.type(typo_char, delay=int(random.uniform(0.08, 0.22) * 1000))
-                    page.wait_for_timeout(random.randint(150, 350))
-                    page.keyboard.press("Backspace")
-                    page.wait_for_timeout(random.randint(100, 250))
-
-                delay_sec = random.uniform(0.08, 0.22)
-                page.keyboard.type(ch, delay=int(delay_sec * 1000))
-                if ch == " ":
-                    page.wait_for_timeout(random.randint(120, 250))
+            biometric_type_text(page, keyword, typo_prob=0.08)
 
             # Nghỉ 0.4 - 0.8s rồi nhấn Enter
             page.wait_for_timeout(int(random.uniform(0.4, 0.8) * 1000))
@@ -589,6 +714,13 @@ def human_type_and_search(page: Page, keyword: str, is_mobile: bool = False) -> 
         return True
 
     except Exception as e:
+        if _is_page_crash_or_closed_error(e):
+            logger.warning(f"[Auto-Recovery] Phát hiện Page crashed / TargetClosedError cho '{keyword}': {e}")
+            try:
+                page.close()
+            except Exception:
+                pass
+            raise
         logger.error(f"Lỗi khi thực hiện tìm kiếm tự nhiên cho '{keyword}': {e}")
         return False
 

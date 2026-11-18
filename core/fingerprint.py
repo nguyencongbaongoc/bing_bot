@@ -29,13 +29,17 @@ def get_deterministic_hardware_profile(account_id: str = "primary_account") -> D
     }
 
 
-def inject_stealth_fingerprint(context, account_id: str = "primary_account"):
+def inject_stealth_fingerprint(context, account_id: str = "primary_account", is_mobile: bool = False):
     """Tiêm script can thiệp DOM ở Isolated World trước khi trang nạp bất kỳ mã JS nào."""
     profile = get_deterministic_hardware_profile(account_id)
     r_noise, g_noise, b_noise = profile["canvas_noise"]
     a_noise = profile["audio_noise"]
-    cpu_cores = profile["hardware_concurrency"]
-    ram_gb = profile["device_memory"]
+    if is_mobile:
+        cpu_cores = 8
+        ram_gb = 8
+    else:
+        cpu_cores = profile["hardware_concurrency"]
+        ram_gb = profile["device_memory"]
 
     stealth_js = f"""
     (() => {{

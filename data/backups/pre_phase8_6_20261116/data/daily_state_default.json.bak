@@ -1,0 +1,16 @@
+{
+  "completed_date": null,
+  "completed_at": null,
+  "status": "partial",
+  "account_id": "default",
+  "date": "2026-11-16",
+  "edge_browsing_seconds": 1860,
+  "edge_browsing_done": true,
+  "updated_at": "2026-11-16T14:10:02.167692",
+  "partial": true,
+  "checkin_awarded": 0,
+  "alerts_sent": {
+    "milestone_1500": "2026-11-16"
+  },
+  "consecutive_failures": 0
+}

@@ -45,6 +45,7 @@ from .activities import (
     create_random_sample_png,
     solve_visual_search_streak,
     handle_visual_search_streak,
+    is_valid_visual_search_result,
     claim_msn_daily_gaming_tile,
     solve_wallpaper_trivia,
     interact_with_copilot,
@@ -63,6 +64,7 @@ from .searcher import (
     human_type_and_search,
     human_bezier_move,
     perform_related_cluster_search,
+    is_valid_related_search_link,
     execute_single_search,
 )
 from .mobile_app_api import (
@@ -71,6 +73,26 @@ from .mobile_app_api import (
     claim_daily_checkin,
     solve_mobile_app_promotions,
     solve_mobile_app_read_to_earn,
+    fetch_dapi_me_profile,
+    parse_dapi_me_progress,
+    set_oauth_file,
+)
+from .state_store import (
+    StateStore,
+    atomic_write_json,
+    safe_read_json,
+    get_account_paths,
+    migrate_legacy_default_account,
+)
+from .cooldown_controller import (
+    CooldownController,
+    get_variable_batch_size,
+    get_natural_cooldown_seconds,
+)
+from .notifier import (
+    Notifier,
+    send_telegram_message,
+    send_windows_toast,
 )
 
 __all__ = [
@@ -110,6 +132,7 @@ __all__ = [
     "create_random_sample_png",
     "solve_visual_search_streak",
     "handle_visual_search_streak",
+    "is_valid_visual_search_result",
     "claim_msn_daily_gaming_tile",
     "solve_wallpaper_trivia",
     "interact_with_copilot",
@@ -124,10 +147,25 @@ __all__ = [
     "human_type_and_search",
     "human_bezier_move",
     "perform_related_cluster_search",
+    "is_valid_related_search_link",
     "execute_single_search",
     "get_mobile_access_token",
     "solve_mobile_app_daily_checkin",
     "claim_daily_checkin",
     "solve_mobile_app_promotions",
     "solve_mobile_app_read_to_earn",
+    "fetch_dapi_me_profile",
+    "parse_dapi_me_progress",
+    "set_oauth_file",
+    "StateStore",
+    "atomic_write_json",
+    "safe_read_json",
+    "get_account_paths",
+    "migrate_legacy_default_account",
+    "CooldownController",
+    "get_variable_batch_size",
+    "get_natural_cooldown_seconds",
+    "Notifier",
+    "send_telegram_message",
+    "send_windows_toast",
 ]

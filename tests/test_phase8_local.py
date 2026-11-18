@@ -166,11 +166,13 @@ class TestPhase8Local(unittest.TestCase):
             mock_finish.assert_called_with(1000, status="partial")
 
     def test_4_visual_search_vietnamese_locator_no_syntax_error(self):
-        """Evaluating the Vietnamese 'Duyệt' selector uses Patchright locator API with 0 SyntaxError."""
+        """Evaluating the Vietnamese 'Duyệt' selector uses Phase 8.1 upload_visual_search_image with 0 SyntaxError."""
         src = (ROOT_DIR / "core" / "activities.py").read_text(encoding="utf-8")
         self.assertNotIn('document.querySelector("{browse_sel}")', src)
-        self.assertIn('browse_btn.click(force=True, timeout=3000)', src)
-        self.assertIn('explore.microsoft.com', src)
+        self.assertIn("def upload_visual_search_image(", src)
+        self.assertIn("direct_inp.set_input_files(str(image_path))", src)
+        self.assertIn("expect_file_chooser(timeout=5000)", src)
+        self.assertIn("explore.microsoft.com", src)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,2145 @@
+#!/usr/bin/env python3
+"""
+Unified Orchestrator - Phase 5 Full Automation Pipeline.
+Quản lý toàn bộ quy trình: Check-in/Activities -> Search Loop (Desktop+Mobile Cooldown) -> Logging.
+"""
+
+import argparse
+import ctypes
+import datetime
+import importlib
+import json
+import math
+import os
+import random
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import traceback
+import urllib.parse
+from pathlib import Path
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+# Use PYTHONUTF8=1 environment variable instead of manual wrapping
+# This avoids issues with stream wrapping in subprocesses
+
+# Add parent to path for core imports
+sys.path.insert(0, str(Path(__file__).parent))
+from core import (
+    fetch_trending_queries,
+    get_unique_search_queries,
+    save_searched_keyword,
+    typing_delay,
+    cooldown_sleep,
+    extract_current_points,
+    log_session_result,
+    run_all_dashboard_activities,
+    enable_streak_protection,
+    ensure_streak_protection,
+    detect_unusual_activity_warning,
+    solve_visual_search_streak,
+    handle_visual_search_streak,
+    solve_mobile_app_daily_checkin,
+    solve_mobile_app_promotions,
+    solve_mobile_app_read_to_earn,
+    solve_punch_cards,
+    solve_all_earn_quests,
+    solve_keep_earning_activities,
+    unload_model_from_vram,
+    claim_msn_daily_gaming_tile,
+    solve_wallpaper_trivia,
+    interact_with_copilot,
+    solve_promotional_links,
+    get_daily_search_progress,
+    tap_corner_rewards_coin,
+    perform_related_cluster_search,
+)
+from core.activities import (
+    solve_mobile_checkin,
+    dismiss_popups,
+    claim_all_available_rewards,
+    extract_bing_star_bonus,
+)
+from core.searcher import human_type_and_search
+from core.fingerprint import inject_stealth_fingerprint, get_deterministic_hardware_profile
+from core.tracker import (
+    init_session,
+    update_session,
+    finish_session,
+    logger,
+    _log_info,
+    _log_debug,
+    _log_warning,
+    _log_error,
+    _log_exception,
+)
+
+# ==================== CONFIGURATION ====================
+ROOT_DIR = Path(__file__).resolve().parent
+DATA_DIR = ROOT_DIR / "data"
+DAILY_STATE_FILE = DATA_DIR / "daily_state.json"
+LOCK_FILE = DATA_DIR / "locks" / "runner.lock"
+EDGE_BROWSING_CAP_SECONDS = 1860  # 31 phút (30 phút + 1 phút buffer an toàn)
+DESKTOP_PROFILE = ROOT_DIR / "profiles" / "desktop"
+MOBILE_PROFILE = ROOT_DIR / "profiles" / "mobile"
+REWARDS_URL = "https://rewards.bing.com"
+BING_URL = "https://www.bing.com"
+
+ACCOUNT_ID = "acc_primary"
+DEFAULT_TIMEOUT = 8000  # 8 seconds default timeout
+
+# Tham số khởi động trình duyệt tối ưu phần cứng & ngụy trang tự nhiên trên Windows:
+# 1. Không lặp lại các cờ Patchright đã tự tiêm (--disable-blink-features=AutomationControlled,
+#    --disable-search-engine-choice-screen, --disable-background-timer-throttling)
+# 2. Loại bỏ toàn bộ cờ container/synthetic (--no-sandbox, --use-mock-keychain,
+#    --password-store=basic, --disable-application-cache, --disk-cache-size, --media-cache-size)
+#    để msedge.exe khởi chạy gần với cấu hình mặc định và giữ warm cache.
+# 3. Giới hạn 15 FPS và tắt GPU vsync để GPU nghỉ ngơi mát mẻ (<5W, 0 RPM)
+BROWSER_ARGS = [
+    "--disable-gpu-vsync",                # Tắt đồng bộ dọc giảm tải GPU
+    "--frame-rate-limit=15",              # Giới hạn 15 FPS cho trình duyệt
+    "--blink-settings=imagesEnabled=true", # Vẫn giữ nạp ảnh nếu cần làm nhiệm vụ
+]
+
+DUPLICATE_PATCHRIGHT_FLAGS = {
+    "--disable-blink-features=AutomationControlled",
+    "--disable-search-engine-choice-screen",
+    "--disable-background-timer-throttling",
+}
+
+SYNTHETIC_FLAGS = {
+    "--no-sandbox",
+    "--use-mock-keychain",
+    "--password-store=basic",
+    "--disable-application-cache",
+}
+
+SYNTHETIC_FLAG_PREFIXES = (
+    "--disk-cache-size",
+    "--media-cache-size",
+)
+
+
+def build_launch_args(headless: bool, is_mobile: bool = False) -> list[str]:
+    """Xây dựng danh sách launch args đã loại bỏ trùng lặp, cờ synthetic và xung đột cờ headless."""
+    raw_args = list(BROWSER_ARGS)
+    if headless:
+        raw_args.extend([
+            "--headless=new",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+        ])
+    elif not is_mobile:
+        raw_args.append("--start-maximized")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for flag in raw_args:
+        if flag in DUPLICATE_PATCHRIGHT_FLAGS or flag in SYNTHETIC_FLAGS:
+            continue
+        if any(flag.startswith(prefix) for prefix in SYNTHETIC_FLAG_PREFIXES):
+            continue
+        if headless and flag == "--headless":
+            continue
+        if flag not in seen:
+            seen.add(flag)
+            deduped.append(flag)
+    return deduped
+
+
+def get_sync_playwright():
+    """Import Patchright only when the browser pipeline is started."""
+    try:
+        return importlib.import_module("patchright.sync_api").sync_playwright
+    except ModuleNotFoundError as exc:
+        if exc.name == "patchright" or (exc.name and exc.name.startswith("patchright.")):
+            raise RuntimeError(
+                "Patchright is required. Install it with 'pip install patchright' and run 'patchright install chromium'."
+            ) from exc
+        raise
+
+
+# ==================== SEARCH EXECUTION ====================
+def execute_single_search(page, query: str, device_type: str = "desktop") -> bool:
+    """
+    Thực hiện một lượt tìm kiếm tự nhiên trên Bing bằng cơ chế gõ phím giống người thật.
+    
+    Args:
+        page: Playwright Page object
+        query: Từ khóa tìm kiếm
+        device_type: "desktop", "mobile", hoặc "sidebar"
+        
+    Returns:
+        True nếu thành công
+    """
+    is_mobile = (device_type.lower() == "mobile")
+    return human_type_and_search(page, query, is_mobile=is_mobile)
+
+
+def active_edge_browsing_cooldown(page, total_seconds: int = 900, initial_seconds: int = 0):
+    """
+    Duy trì phiên duyệt web Edge trong thời gian Cooldown để hoàn thành
+    nhiệm vụ Edge Browsing Streak (30 phút/ngày) mà không tốn thêm thời gian.
+    Lưu ý: Tuyệt đối KHÔNG gọi context.close().
+    Giới hạn cứng 1860s/ngày và lưu tiến độ mỗi 60s vào data/daily_state.json.
+    """
+    remaining_cap = max(0, EDGE_BROWSING_CAP_SECONDS - initial_seconds)
+    target_seconds = min(total_seconds, remaining_cap)
+    if target_seconds <= 0:
+        update_edge_browsing_state(EDGE_BROWSING_CAP_SECONDS, done=True)
+        return page, 0
+
+    logger.info(
+        f"[Edge Browsing] Bắt đầu phiên duyệt web ngầm tích lũy thời gian "
+        f"({target_seconds // 60}m {target_seconds % 60}s, đã tích lũy {initial_seconds}s/{EDGE_BROWSING_CAP_SECONDS}s)..."
+    )
+
+    context = getattr(page, "context", None)
+
+    # Đảm bảo duy trì ít nhất một tab sống (không bao giờ để 0 tab khiến browser thoát)
+    try:
+        if page is None or page.is_closed():
+            if context and context.pages:
+                page = context.pages[0]
+            elif context:
+                page = context.new_page()
+    except Exception:
+        pass
+
+    # Điều hướng tới trang tin tức nhẹ
+    try:
+        if page and not page.is_closed():
+            page.goto("https://www.bing.com/news", wait_until="domcontentloaded", timeout=12000)
+    except Exception:
+        pass
+
+    start_time = time.time()
+    last_persisted_at = start_time
+    last_scroll_at = start_time
+    scroll_interval = random.randint(120, 180)
+
+    while True:
+        elapsed = int(time.time() - start_time)
+        cumulative = initial_seconds + elapsed
+        if elapsed >= target_seconds or cumulative >= EDGE_BROWSING_CAP_SECONDS:
+            final_secs = min(EDGE_BROWSING_CAP_SECONDS, cumulative)
+            update_edge_browsing_state(final_secs, done=(final_secs >= EDGE_BROWSING_CAP_SECONDS))
+            break
+
+        # Lưu tiến độ mỗi 60 giây vào data/daily_state.json
+        if time.time() - last_persisted_at >= 60:
+            update_edge_browsing_state(cumulative, done=False)
+            last_persisted_at = time.time()
+
+        # Mô phỏng tương tác người dùng mỗi 2-3 phút để Edge gửi Heartbeat Telemetry
+        if time.time() - last_scroll_at >= scroll_interval:
+            try:
+                if page and not page.is_closed():
+                    scroll_y = random.choice([300, 500, -200, 400])
+                    page.mouse.wheel(0, scroll_y)
+                    page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            last_scroll_at = time.time()
+            scroll_interval = random.randint(120, 180)
+
+        remaining = min(target_seconds - elapsed, EDGE_BROWSING_CAP_SECONDS - cumulative)
+        sleep_chunk = min(60, remaining)
+        if sleep_chunk > 0:
+            logger.info(
+                f"[Edge Browsing Streak] Đang tích lũy ({cumulative}/{EDGE_BROWSING_CAP_SECONDS}s)... "
+                f"Còn lại đợt này: {remaining // 60}m {remaining % 60}s"
+            )
+            time.sleep(sleep_chunk)
+
+    # Đảm bảo luôn giữ ít nhất 1 tab sống
+    try:
+        if context:
+            open_pages = [p for p in context.pages if not p.is_closed()]
+            if not open_pages:
+                blank_page = context.new_page()
+                blank_page.goto("about:blank")
+    except Exception:
+        pass
+
+    actual_elapsed = int(time.time() - start_time)
+    logger.info("[Edge Browsing] Hoàn thành đợt tích lũy thời gian Cooldown.")
+    return page, actual_elapsed
+
+
+def apply_stealth_scripts(context, is_mobile: bool = False, cpu_threads: int = None, account_id: str = "acc_primary"):
+    """Tiêm script xóa dấu vết tự động hóa của Patchright/CDP và đồng bộ User-Agent Client Hints, hardwareConcurrency, deviceMemory."""
+    platform_val = "Linux armv8l" if is_mobile else "Win32"
+    ua_platform = "Android" if is_mobile else "Windows"
+    is_mob_js = "true" if is_mobile else "false"
+    model_val = "Pixel 7" if is_mobile else ""
+    platform_version = "14.0.0" if is_mobile else "15.0.0"
+    arch_val = "arm" if is_mobile else "x86"
+    profile = get_deterministic_hardware_profile(account_id)
+    if is_mobile:
+        hw_concurrency = 8
+        device_memory = 8
+    else:
+        hw_concurrency = cpu_threads or profile["hardware_concurrency"]
+        device_memory = profile["device_memory"]
+
+    stealth_js = f"""
+    // 1. Xóa cờ webdriver
+    Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+
+    // 2. Đồng bộ platform chuẩn với thiết bị
+    Object.defineProperty(navigator, 'platform', {{ get: () => '{platform_val}' }});
+
+    // 3. Giả lập languages tự nhiên
+    Object.defineProperty(navigator, 'languages', {{ get: () => ['vi-VN', 'vi', 'en-US', 'en'] }});
+
+    // 4. Đồng bộ sâu hardwareConcurrency & deviceMemory
+    Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {hw_concurrency} }});
+    Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {device_memory} }});
+
+    // 5. Đảm bảo kích thước outerWidth/outerHeight hợp lệ khi chạy ngầm
+    if (window.outerWidth === 0 || window.outerHeight === 0) {{
+        Object.defineProperty(window, 'outerWidth', {{ get: () => window.innerWidth }});
+        Object.defineProperty(window, 'outerHeight', {{ get: () => window.innerHeight + 85 }});
+    }}
+
+    // 6. Đồng bộ User-Agent Client Hints (navigator.userAgentData) khớp 100% môi trường
+    const mockUAData = {{
+        brands: [
+            {{ brand: "Microsoft Edge", version: "131" }},
+            {{ brand: "Chromium", version: "131" }},
+            {{ brand: "Not_A Brand", version: "24" }}
+        ],
+        mobile: {is_mob_js},
+        platform: "{ua_platform}",
+        toJSON: function() {{
+            return {{ brands: this.brands, mobile: this.mobile, platform: this.platform }};
+        }},
+        getHighEntropyValues: function(hints) {{
+            return Promise.resolve({{
+                brands: this.brands,
+                mobile: {is_mob_js},
+                platform: "{ua_platform}",
+                platformVersion: "{platform_version}",
+                architecture: "{arch_val}",
+                bitness: "64",
+                model: "{model_val}",
+                uaFullVersion: "131.0.2903.86"
+            }});
+        }}
+    }};
+    try {{
+        Object.defineProperty(navigator, 'userAgentData', {{ get: () => mockUAData, configurable: true }});
+    }} catch(e) {{}}
+    """
+    context.add_init_script(stealth_js)
+    inject_stealth_fingerprint(context, account_id=account_id, is_mobile=is_mobile)
+
+
+FIRST_PARTY_ALLOWLIST_DOMAINS = (
+    "bing.com",
+    "microsoft.com",
+    "live.com",
+    "msn.com",
+    "bing.net",
+    "msecnd.net",
+    "microsoftonline.com",
+    "azureedge.net",
+    "aspnetcdn.com",
+    "sfx.ms",
+    "office.com",
+    "office.net",
+    "sharepoint.com",
+)
+
+BLOCKED_AD_TRACKER_DOMAINS = (
+    "doubleclick.net",
+    "googlesyndication.com",
+    "taboola.com",
+    "outbrain.com",
+)
+
+
+def _host_matches_domain(hostname: str, domains: tuple) -> bool:
+    if not hostname:
+        return False
+    host = hostname.lower().strip(".")
+    return any(host == d or host.endswith(f".{d}") for d in domains)
+
+
+def should_abort_route(url: str, resource_type: str) -> bool:
+    """
+    Chặn tài nguyên media (video/audio) và tên miền quảng cáo/tracker bên thứ 3,
+    nhưng luôn giữ nguyên 100% request tới bing.com, microsoft.com, live.com, msn.com và CDN của Microsoft.
+    """
+    try:
+        hostname = urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        hostname = ""
+
+    if _host_matches_domain(hostname, FIRST_PARTY_ALLOWLIST_DOMAINS):
+        return False
+
+    if (resource_type or "").lower() == "media":
+        return True
+
+    if _host_matches_domain(hostname, BLOCKED_AD_TRACKER_DOMAINS):
+        return True
+
+    return False
+
+
+def attach_resource_blocker(context) -> None:
+    """Gắn route interceptor nhẹ lên context để tiết kiệm băng thông/RAM mà không ảnh hưởng telemetry Microsoft."""
+    def _route_handler(route):
+        try:
+            req = route.request
+            if should_abort_route(req.url, req.resource_type):
+                route.abort()
+            else:
+                route.continue_()
+        except Exception:
+            try:
+                route.continue_()
+            except Exception:
+                pass
+
+    context.route("**/*", _route_handler)
+
+
+def create_desktop_context(playwright, headless: bool, account_id: str = "acc_primary"):
+    """Tạo Desktop persistent context với chế độ ngụy trang (Stealth)."""
+    args = build_launch_args(headless=headless, is_mobile=False)
+
+    extra_headers = {
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-CH-UA-Mobile": "?0",
+    }
+
+    launch_kwargs = {
+        "user_data_dir": str(DESKTOP_PROFILE),
+        "channel": "msedge",
+        "headless": headless,
+        "args": args,
+        "no_viewport": not headless,
+        "locale": "vi-VN",
+        "timezone_id": "Asia/Ho_Chi_Minh",
+        "extra_http_headers": extra_headers,
+    }
+    if headless:
+        launch_kwargs["ignore_default_args"] = ["--headless"]
+
+    context = playwright.chromium.launch_persistent_context(**launch_kwargs)
+    apply_stealth_scripts(context, is_mobile=False, account_id=account_id)
+    attach_resource_blocker(context)
+    return context
+
+
+def create_mobile_context(playwright, headless: bool, account_id: str = "acc_primary"):
+    """Tạo Mobile emulation persistent context giả lập Android (Pixel 7)."""
+    mobile_device = dict(playwright.devices["Pixel 7"])
+    mobile_device.pop("default_browser_type", None)
+    mobile_device["viewport"] = {"width": 412, "height": 915}
+    mobile_device["screen"] = {"width": 412, "height": 915}
+    mobile_device["device_scale_factor"] = 2.625
+    mobile_device["is_mobile"] = True
+    mobile_device["has_touch"] = True
+
+    # Chuẩn hóa User-Agent Edge Android (EdgA) để nhận thưởng trọn vẹn điểm Edge Mobile
+    ua = mobile_device.get("user_agent", "")
+    if "EdgA" not in ua:
+        chrome_ver = "131.0.0.0"
+        mobile_device["user_agent"] = f"Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Mobile Safari/537.36 EdgA/{chrome_ver}"
+
+    args = build_launch_args(headless=headless, is_mobile=True)
+
+    extra_headers = {
+        "Sec-CH-UA-Platform": '"Android"',
+        "Sec-CH-UA-Mobile": "?1",
+        "Sec-CH-UA-Model": '"Pixel 7"',
+    }
+
+    launch_kwargs = {
+        "user_data_dir": str(MOBILE_PROFILE),
+        "channel": "msedge",
+        "headless": headless,
+        "args": args,
+        **mobile_device,
+        "locale": "vi-VN",
+        "timezone_id": "Asia/Ho_Chi_Minh",
+        "extra_http_headers": extra_headers,
+    }
+    if headless:
+        launch_kwargs["ignore_default_args"] = ["--headless"]
+
+    context = playwright.chromium.launch_persistent_context(**launch_kwargs)
+    apply_stealth_scripts(context, is_mobile=True, account_id=account_id)
+    attach_resource_blocker(context)
+    return context
+
+
+def _is_recoverable_browser_error(err: Exception) -> bool:
+    """Kiểm tra lỗi TargetClosedError hoặc exitCode=21 cần dọn lock profile."""
+    err_name = type(err).__name__.lower()
+    err_msg = str(err).lower()
+    return (
+        "targetclosed" in err_name
+        or "targetclosederror" in err_msg
+        or "exitcode=21" in err_msg
+        or "exit code 21" in err_msg
+        or "browser has been closed" in err_msg
+    )
+
+
+def _cleanup_profile_locks_and_processes(profile_dir: Path) -> None:
+    """Xóa SingletonLock/Cookie/Socket và đóng tiến trình Edge mồ côi gắn với profile_dir."""
+    resolved_profile = str(profile_dir.resolve()).lower().replace("/", "\\")
+    if psutil is not None:
+        try:
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    name = (proc.info.get("name") or "").lower()
+                    if name == "msedge.exe":
+                        cmdline = " ".join(proc.info.get("cmdline") or []).lower().replace("/", "\\")
+                        if "--user-data-dir" in cmdline and resolved_profile in cmdline:
+                            proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception as e:
+            _log_debug(f"[Auto-Recovery] Lỗi khi dọn tiến trình Edge cho {profile_dir.name}: {e}")
+
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        lock_path = profile_dir / lock_name
+        try:
+            if lock_path.exists() or lock_path.is_symlink():
+                lock_path.unlink(missing_ok=True)
+        except Exception as e:
+            _log_debug(f"[Auto-Recovery] Không thể xóa {lock_path}: {e}")
+
+
+def _ensure_context_page(context, playwright_instance, headless: bool, profile_dir: Path, create_fn, label: str):
+    """Đảm bảo lấy được page hợp lệ với cơ chế tự phục hồi 3 lần thử (backoff 2s, 5s, 10s)."""
+    try:
+        if context is not None:
+            if context.pages:
+                page = context.pages[0]
+                if not page.is_closed():
+                    page.set_default_timeout(DEFAULT_TIMEOUT)
+                    return context, page
+            new_page = context.new_page()
+            new_page.set_default_timeout(DEFAULT_TIMEOUT)
+            return context, new_page
+    except Exception as e:
+        _log_warning(f"[Runner] {label} context đã bị đóng hoặc mất kết nối ({e}). Đang khởi tạo lại context mới...")
+        try:
+            if context is not None:
+                context.close()
+        except Exception:
+            pass
+
+    backoffs = (2, 5, 10)
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            new_context = create_fn(playwright_instance, headless, account_id=ACCOUNT_ID)
+            new_page = new_context.pages[0] if new_context.pages else new_context.new_page()
+            new_page.set_default_timeout(DEFAULT_TIMEOUT)
+            return new_context, new_page
+        except Exception as err:
+            last_err = err
+            _log_warning(f"[Runner] Khởi tạo {label} context thất bại (lần {attempt}/3): {err}")
+            if _is_recoverable_browser_error(err):
+                _cleanup_profile_locks_and_processes(profile_dir)
+            if attempt < 3:
+                wait_s = backoffs[attempt - 1]
+                _log_info(f"[Runner] Chờ {wait_s}s trước khi thử khởi tạo lại {label} context...")
+                time.sleep(wait_s)
+
+    _log_error(f"[Runner] Không thể khởi tạo lại {label} context sau 3 lần thử: {last_err}")
+    raise last_err
+
+
+def ensure_desktop_page(d_context, playwright_instance, headless: bool):
+    """
+    Đảm bảo luôn lấy được một d_page hợp lệ.
+    Nếu d_context bị đóng hoặc lỗi khởi tạo, tự động dọn lock và hồi sinh (3 lần thử).
+    """
+    return _ensure_context_page(
+        d_context,
+        playwright_instance,
+        headless,
+        DESKTOP_PROFILE,
+        create_desktop_context,
+        "Desktop",
+    )
+
+
+def ensure_mobile_page(m_context, playwright_instance, headless: bool):
+    """
+    Đảm bảo luôn lấy được một m_page hợp lệ cho di động.
+    Nếu m_context bị đóng hoặc lỗi khởi tạo, tự động dọn lock và hồi sinh (3 lần thử).
+    """
+    return _ensure_context_page(
+        m_context,
+        playwright_instance,
+        headless,
+        MOBILE_PROFILE,
+        create_mobile_context,
+        "Mobile",
+    )
+
+
+def get_variable_batch_size(configured_batch_size: int = 3) -> int:
+    """Trả về kích thước batch ngẫu nhiên (2..5) khi dùng cấu hình mặc định."""
+    if configured_batch_size == 3:
+        return random.randint(2, 5)
+    return max(1, int(configured_batch_size))
+
+
+def get_natural_cooldown_seconds() -> int:
+    """
+    Trả về khoảng nghỉ cooldown phân phối log-normal tự nhiên trong khoảng 16..24 phút (960..1440s).
+    """
+    raw = random.lognormvariate(math.log(1170), 0.12)
+    return int(max(960, min(1440, round(raw))))
+
+
+def perform_warmup_visit(page, duration_range: tuple[float, float] = (5.0, 8.0)) -> bool:
+    """
+    Thực hiện lượt ghé thăm khởi động nhẹ (MSN Việt Nam hoặc Bing News/Weather) 5-8s ở đầu phiên
+    để lịch sử duyệt web tự nhiên hơn bên cạnh rewards.bing.com.
+    """
+    if page is None:
+        return False
+    urls = [
+        "https://www.msn.com/vi-vn",
+        "https://www.bing.com/news",
+    ]
+    target_url = random.choice(urls)
+    try:
+        logger.info(f"[Warmup] Ghé thăm nhẹ {target_url} làm ấm phiên duyệt web...")
+        page.goto(target_url, wait_until="domcontentloaded", timeout=10000)
+        total_wait = random.uniform(*duration_range)
+        scroll_steps = random.randint(2, 3)
+        step_sleep = total_wait / (scroll_steps + 1)
+        for idx in range(scroll_steps):
+            time.sleep(step_sleep)
+            delta_y = -random.randint(80, 150) if (idx > 0 and random.random() < 0.25) else random.randint(200, 450)
+            try:
+                page.mouse.wheel(0, delta_y)
+            except Exception:
+                pass
+        time.sleep(step_sleep)
+        return True
+    except Exception as exc:
+        logger.debug(f"[Warmup] Bỏ qua warmup visit ({target_url}): {exc}")
+        return False
+
+
+# ==================== MAIN ORCHESTRATOR ====================
+def run_full_pipeline(
+    args=None,
+    desktop_target: int = 30,
+    mobile_target: int = 20,
+    batch_size: int = 3,
+    headless: bool = True,
+) -> bool:
+    """
+    Pipeline hoàn chỉnh Phase 5:
+    1. Desktop: Check-in + Daily Set + More Activities + Đọc điểm đầu
+    2. Loop: Desktop Batch -> Mobile Batch -> Cooldown 15m (nếu chưa xong)
+    3. Desktop: Đọc điểm cuối + Ghi log
+    
+    Returns:
+        True nếu tất cả mục tiêu tìm kiếm đã đạt
+    """
+    if args is not None:
+        if hasattr(args, "desktop_target"):
+            desktop_target = args.desktop_target
+        if hasattr(args, "mobile_target"):
+            mobile_target = args.mobile_target
+        if hasattr(args, "batch_size"):
+            batch_size = args.batch_size
+        if hasattr(args, "debug"):
+            headless = not args.debug
+
+    # Kiểm tra cờ chạy tự động vs tùy biến
+    is_debug = bool(args and getattr(args, "debug", False))
+    has_custom_target = bool(args and (
+        (getattr(args, 'desktop_target', 30) != 30) or 
+        (getattr(args, 'mobile_target', 20) != 20) or
+        any(arg.startswith("--desktop-target") or arg.startswith("--mobile-target") for arg in sys.argv)
+    ))
+
+    # Zero-Browser Daily Lock: Nếu chạy tự động không debug/custom target và hôm nay đã hoàn thành 100%
+    if not is_debug and not has_custom_target and is_today_already_completed():
+        _log_info("[Daily Lock] Hôm nay đã hoàn thành 100% mục tiêu điểm. Thoát sớm để bảo vệ SSD & tài khoản!")
+        return True
+
+    _log_info(f"Config: Desktop={desktop_target}, Mobile={mobile_target}, Batch={batch_size} | Headless: {headless}")
+
+    # Trễ khởi động ngẫu nhiên (Startup Jitter) khi chạy tự động ngầm để làm lệch mốc giờ máy móc
+    if args and not getattr(args, "debug", False):
+        jitter_seconds = random.randint(30, 90)
+        _log_info(f"[Stealth] Đợi ngẫu nhiên {jitter_seconds} giây để làm lệch mốc giờ cố định (Startup Jitter)...")
+        time.sleep(jitter_seconds)
+
+    # Kiểm tra profile tồn tại
+    if not DESKTOP_PROFILE.exists():
+        _log_error(f"Desktop profile không tồn tại: {DESKTOP_PROFILE}")
+        _log_info("   Chạy: python setup_login.py --desktop")
+        return False
+    
+    if not MOBILE_PROFILE.exists():
+        _log_error(f"Mobile profile không tồn tại: {MOBILE_PROFILE}")
+        _log_info("   Chạy: python setup_login.py --mobile")
+        return False
+
+    # Chuẩn bị danh sách từ khóa độc nhất theo cụm chủ đề (2-5 câu liên quan/đợt, lọc trùng qua lịch sử 200 câu)
+    total_needed = desktop_target + mobile_target + 6
+    _log_info(f"Đang chuẩn bị {total_needed} từ khóa độc nhất theo cụm chủ đề (lọc trùng qua lịch sử 200 câu gần nhất)...")
+    queries = get_unique_search_queries(target_count=total_needed, geo="VN")
+    
+    _log_info(f"Đã chuẩn bị {len(queries)} từ khóa độc nhất (Topic-Clustered).")
+    _log_info("")
+
+    # Biến đếm
+    d_done = 0
+    m_done = 0
+    start_points = 0
+    end_points = 0
+    queries_idx = 0
+    bing_star_bonus_str = "0 / 2,100"
+
+    d_context = None
+    m_context = None
+    all_tasks_completed = False
+    all_maxed = False
+    all_activities_done = False
+    checkin_awarded = 0
+
+    try:
+        # Network Guard: Chờ kết nối Internet ổn định tối đa 60s sau khi máy thức dậy từ Sleep
+        if not wait_for_internet(timeout=60):
+            _log_error("[Network Guard] Không có kết nối Internet sau 60s, hủy bỏ phiên chạy.")
+            return False
+
+        with get_sync_playwright()() as p:
+            # ========================================================
+            # BƯỚC 1: DESKTOP CONTEXT - ACTIVITIES & ĐIỂM ĐẦU
+            # ========================================================
+            _log_info("[1/3] Khởi chạy Desktop Context để xử lý Activities & Streak...")
+            try:
+                d_context, d_page = ensure_desktop_page(d_context, p, headless)
+
+                # Warmup traffic nhẹ ở đầu phiên (MSN / Bing News 5-8s)
+                perform_warmup_visit(d_page)
+
+                # Đọc điểm số khởi đầu
+                d_page.goto(REWARDS_URL, wait_until="domcontentloaded")
+                d_page.wait_for_timeout(2000)
+                dismiss_popups(d_page)
+                start_points = extract_current_points(d_page)
+                _log_info(f"Điểm số ban đầu: {start_points:,}")
+
+                # Khiên Anti-Ban: Kiểm tra cảnh báo giới hạn trên Dashboard
+                safe_throttle_mode = False
+                try:
+                    if detect_unusual_activity_warning(d_page):
+                        safe_throttle_mode = True
+                        _log_warning("[Anti-Ban Shield] Phát hiện cảnh báo giới hạn tốc độ tìm kiếm! Chuyển sang chế độ Safe Throttle (giãn cách 35-60s/câu)...")
+                except Exception as e:
+                    _log_debug(f"Lỗi kiểm tra cảnh báo giới hạn ban đầu: {e}")
+
+                # Khởi tạo session logging ngay lập tức
+                init_session(start_points)
+
+                # KIỂM TRA TIẾN ĐỘ THỰC TẾ TRÊN DASHBOARD / POINTS BREAKDOWN NGAY TỪ ĐẦU (SCAN PHASE 1)
+                initial_progress = get_daily_search_progress(d_page)
+                sync_edge_browsing_from_progress(initial_progress)
+                bing_star_bonus_str = initial_progress.get("bing_star_bonus", {}).get("text", bing_star_bonus_str)
+                verified_pc_cur = initial_progress.get("pc_cur", 0)
+                verified_pc_max = initial_progress.get("pc_max", 90)
+                verified_mob_cur = initial_progress.get("mobile_cur", 0)
+                verified_mob_max = initial_progress.get("mobile_max", 60)
+                verified_found_pc = initial_progress.get("found_pc", False)
+                verified_found_mob = initial_progress.get("found_mobile", False)
+                all_maxed = initial_progress.get("all_maxed", False)
+                all_activities_done = initial_progress.get("all_activities_done", False)
+                init_act = initial_progress.get("activities", {})
+                init_primary_four = initial_progress.get("primary_four_done", False) or (
+                    init_act.get("Bing Search", {}).get("done", False) and
+                    init_act.get("Daily Set", {}).get("done", False) and
+                    init_act.get("Edge Browsing", {}).get("done", False) and
+                    init_act.get("Visual Search", {}).get("done", False)
+                )
+                init_mob_done = init_act.get("Mobile App", {}).get("done", False)
+                if not all_activities_done and all_maxed and init_primary_four and not init_mob_done and is_today_already_completed():
+                    all_activities_done = True
+                    initial_progress["all_activities_done"] = True
+                is_explicit_test = bool(args and getattr(args, "desktop_target", None) == 0 and getattr(args, "mobile_target", None) == 0)
+                is_test_target = bool(args and ((getattr(args, 'desktop_target', 30) not in (0, 30)) or (getattr(args, 'mobile_target', 20) not in (0, 20))))
+                _log_info(f"[Scan Phase 1] Tiến độ thực tế ban đầu: Desktop {initial_progress.get('pc_cur')}/{initial_progress.get('pc_max')} | Mobile {initial_progress.get('mobile_cur')}/{initial_progress.get('mobile_max')}")
+                if all_maxed and all_activities_done and not is_explicit_test and not is_test_target:
+                    _log_info("[✓] Đã kiểm tra Dashboard: Toàn bộ nhiệm vụ và điểm tìm kiếm hôm nay đã đạt 100%! Bỏ qua tìm kiếm.")
+                    desktop_target = 0
+                    mobile_target = 0
+                    all_tasks_completed = True
+                    end_points = start_points
+                else:
+                    # Bật Streak Protection (Bảo vệ chuỗi ngày)
+                    try:
+                        ensure_streak_protection(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi bật Streak Protection: {e}")
+
+                    # Chạy Check-in, Daily Set, More Activities
+                    try:
+                        run_all_dashboard_activities(d_context, d_page)
+                        update_session(0, start_points, "Dashboard activities completed")
+                    except Exception as e:
+                        _log_error(f"Lỗi khi xử lý activities: {e}")
+                        _log_exception("Activities error details:")
+
+                    # Tự động hoàn thành Visual Search Streak
+                    try:
+                        solve_visual_search_streak(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi giải Visual Search Streak: {e}")
+
+                    # Điểm danh 7 ngày trên App Bing bằng OAuth API (type: 103)
+                    try:
+                        checkin_awarded = solve_mobile_app_daily_checkin(d_page)
+                        sleep_time = random.uniform(2.0, 4.0)
+                        _log_debug(f"[App Check-in] Nghỉ {sleep_time:.1f}s sau khi gọi API check-in...")
+                        time.sleep(sleep_time)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi xử lý Mobile App Daily Check-in: {e}")
+
+                    # Quét App Promotions (GET /dapi/me) để thu thập điểm ẩn
+                    try:
+                        solve_mobile_app_promotions(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi quét Mobile App Promotions: {e}")
+
+                    # Thực hiện nhiệm vụ Read to Earn qua Mobile App API (+30 điểm/ngày)
+                    try:
+                        solve_mobile_app_read_to_earn(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi xử lý Mobile Read to Earn: {e}")
+
+                    # Giải các thẻ sự kiện Punch Cards
+                    try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        solve_punch_cards(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi giải Punch Cards: {e}")
+
+                    # Quét và cày toàn bộ Quests/Punch Cards lớn tại /earn
+                    try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        solve_all_earn_quests(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi xử lý /earn Quests: {e}")
+
+                    # Quét và giải các thẻ trong mục "Keep earning" tại /earn (đạt tối đa điểm 70/70)
+                    try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        solve_keep_earning_activities(d_page, d_context)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi xử lý Keep Earning: {e}")
+
+                    # Claim MSN Daily Gaming Tile (+10 đến +50 pts)
+                    try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        claim_msn_daily_gaming_tile(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi quét Gaming Tile: {e}")
+
+                    # Giải Bing Wallpaper Trivia (+10 đến +15 pts)
+                    try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        solve_wallpaper_trivia(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi giải Wallpaper Trivia: {e}")
+
+                    # Tương tác Copilot Chat (+5 đến +15 pts)
+                    try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        interact_with_copilot(d_page, query="Tin tức hôm nay")
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi tương tác Copilot: {e}")
+
+                    # Quét Promotional & Newsletter Links (+20 đến +50 pts/tuần)
+                    try:
+                        if d_page is None or d_page.is_closed():
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        solve_promotional_links(d_page)
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi xử lý Promo Links: {e}")
+
+                    # Claim tất cả phần thưởng khả dụng sau khi hoàn tất Activities + /earn Quests
+                    try:
+                        claim_all_available_rewards(d_page)
+                        update_session(0, None, "Final claim sweep completed")
+                    except Exception as e:
+                        _log_warning(f"Lỗi khi quét claim cuối cùng: {e}")
+
+                    # Giải phóng VRAM sau khi xong phần Activities
+                    try:
+                        unload_model_from_vram()
+                    except Exception:
+                        pass
+
+                    # Kiểm tra lại tiến độ sau khi hoàn thành Activities (SCAN PHASE 2)
+                    if d_page is None or d_page.is_closed():
+                        d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                    post_progress = get_daily_search_progress(d_page)
+                    sync_edge_browsing_from_progress(post_progress)
+
+                    if post_progress.get("scrape_error") or (
+                        not post_progress.get("found_pc")
+                        and not post_progress.get("found_mobile")
+                        and (verified_found_pc or verified_found_mob)
+                    ):
+                        _log_warning(
+                            f"[Scan Phase 2] Lỗi/Timeout khi đọc Dashboard. Giữ nguyên tiến độ hợp lệ từ Scan Phase 1: "
+                            f"Desktop {verified_pc_cur}/{verified_pc_max} | Mobile {verified_mob_cur}/{verified_mob_max}"
+                        )
+                        pc_cur = verified_pc_cur
+                        pc_max = verified_pc_max
+                        mob_cur = verified_mob_cur
+                        mob_max = verified_mob_max
+                        all_maxed = initial_progress.get("all_maxed", False)
+                        all_activities_done = initial_progress.get("all_activities_done", False)
+                        activities = initial_progress.get("activities", {})
+                    else:
+                        pc_cur = post_progress.get("pc_cur", 0)
+                        pc_max = post_progress.get("pc_max", 90)
+                        mob_cur = post_progress.get("mobile_cur", 0)
+                        mob_max = post_progress.get("mobile_max", 60)
+                        all_maxed = post_progress.get("all_maxed", False)
+                        all_activities_done = post_progress.get("all_activities_done", False)
+                        activities = post_progress.get("activities", {})
+                        if post_progress.get("found_pc"):
+                            verified_pc_cur, verified_pc_max, verified_found_pc = pc_cur, pc_max, True
+                        if post_progress.get("found_mobile"):
+                            verified_mob_cur, verified_mob_max, verified_found_mob = mob_cur, mob_max, True
+
+                    # BƯỚC 3 Fallback: Kiểm tra lại thẻ Mobile App ở Pha Scan 2
+                    primary_four_done = post_progress.get("primary_four_done", False) or (
+                        activities.get("Bing Search", {}).get("done", False) and
+                        activities.get("Daily Set", {}).get("done", False) and
+                        activities.get("Edge Browsing", {}).get("done", False) and
+                        activities.get("Visual Search", {}).get("done", False)
+                    )
+                    mob_app_done = activities.get("Mobile App", {}).get("done", False)
+
+                    if all_activities_done:
+                        _log_info("[Mobile App] [✓] Tuyệt vời! Thẻ Mobile App đã đạt 1/1 [✓] trên Dashboard.")
+                    elif all_maxed and primary_four_done and not mob_app_done:
+                        _log_info("[Mobile App Fallback] Dữ liệu thực tế: Search PC 90/90, Mobile 60/60 và 4/4 nhiệm vụ chính (Bing Search, Daily Set, Edge Browsing, Visual Search) đều đã đạt 100%.")
+                        _log_info("[Mobile App Fallback] Thẻ Mobile App đã được xử lý qua cả API type 103 lẫn CDP Mobile Emulation. Kích hoạt Fallback chấp nhận all_activities_done = True để cho phép khóa daily_state.json (tránh lặp vô tận do server sync lag).")
+                        all_activities_done = True
+                        post_progress["all_activities_done"] = True
+
+                    if all_maxed:
+                        if is_test_target:
+                            _log_info(f"[Test Mode] Điểm hôm nay đã đạt tối đa, nhưng tiếp tục chạy lượt tìm kiếm thử nghiệm: Desktop={desktop_target}, Mobile={mobile_target}")
+                        else:
+                            _log_info("[✓] Dữ liệu thực tế xác nhận: Điểm tìm kiếm PC và Mobile hôm nay đã đạt tối đa 100%! Không cần tìm kiếm thêm.")
+                            desktop_target = 0
+                            mobile_target = 0
+                            if all_activities_done:
+                                all_tasks_completed = True
+                            else:
+                                _log_info("[!] Điểm tìm kiếm đã đạt đỉnh nhưng vẫn còn hoạt động chưa hoàn thành (all_activities_done = False).")
+                    else:
+                        rem_pc_pts = max(0, pc_max - pc_cur)
+                        rem_mob_pts = max(0, mob_max - mob_cur)
+                        desktop_needed = (rem_pc_pts + 2) // 3
+                        mobile_needed = (rem_mob_pts + 2) // 3
+                        orig_d = desktop_target
+                        orig_m = mobile_target
+                        if not is_test_target:
+                            desktop_target = desktop_needed
+                            mobile_target = mobile_needed
+                        _log_info(f"[Scan Phase 2] Dữ liệu thực tế: Desktop {pc_cur}/{pc_max} (thiếu {rem_pc_pts} pts -> cần tìm ~{desktop_target} câu) | Mobile {mob_cur}/{mob_max} (thiếu {rem_mob_pts} pts -> cần tìm ~{mobile_target} câu)")
+                        if desktop_target == 0 and mobile_target == 0 and not is_explicit_test and not is_test_target:
+                            _log_info("[✓] Dữ liệu thực tế xác nhận: Điểm tìm kiếm PC và Mobile hôm nay đã đạt tối đa 100%! Không cần tìm kiếm thêm.")
+                            if all_activities_done:
+                                all_tasks_completed = True
+
+            finally:
+                if d_context:
+                    try:
+                        d_context.close()
+                        _log_info("Đã đóng Desktop context sau Activities.")
+                    except Exception:
+                        _log_info("Desktop context đã tự đóng trước đó.")
+                    d_context = None
+
+            # ========================================================
+            # BƯỚC 2: VÒNG LẶP XEN KẼ TÌM KIẾM (COOLDOWN PIPELINE)
+            # ========================================================
+            if (all_tasks_completed and not is_test_target) or (desktop_target == 0 and mobile_target == 0):
+                _log_info("[2/3] Bỏ qua hoàn toàn chu trình tìm kiếm chống Cooldown do toàn bộ điểm đã đạt tối đa.")
+                if all_maxed and all_activities_done:
+                    all_tasks_completed = True
+            else:
+                # Phá vỡ quy luật dừng máy móc đúng trần 30/20 câu: thỉnh thoảng tìm dư thêm 1-2 lượt tự nhiên
+                if not is_test_target and not is_explicit_test:
+                    if desktop_target >= 30 and random.random() < 0.40:
+                        extra_pc = random.randint(1, 2)
+                        desktop_target += extra_pc
+                        _log_info(f"[Stealth] Thêm {extra_pc} lượt tìm kiếm PC tự nhiên phá vỡ điểm trần cứng -> Target: {desktop_target}")
+                    if mobile_target >= 20 and random.random() < 0.40:
+                        extra_mob = random.randint(1, 2)
+                        mobile_target += extra_mob
+                        _log_info(f"[Stealth] Thêm {extra_mob} lượt tìm kiếm Mobile tự nhiên phá vỡ điểm trần cứng -> Target: {mobile_target}")
+
+                _log_info("[2/3] Bắt đầu chu trình tìm kiếm chống Cooldown...")
+                _log_info("    Pattern: Desktop Batch -> Mobile Batch -> Cooldown 15m (nếu chưa xong)")
+
+                d_page = None
+                try:
+                    # Mở sẵn Desktop Context cho chu trình tìm kiếm & Edge Browsing Cooldown
+                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
+
+                    max_double_check_retries = 3
+                    double_check_attempt = 0
+
+                    while True:
+                        while d_done < desktop_target or m_done < mobile_target:
+                            batch_completed = 0
+                            pc_searched_round = 0
+                            mob_searched_round = 0
+
+                            # Đảm bảo d_page vẫn hoạt động
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+
+                            # ---- 2.1 DESKTOP BATCH ----
+                            if d_done < desktop_target:
+                                # Biến thiên kích thước batch tự nhiên 2-5 câu
+                                current_d_batch = get_variable_batch_size(batch_size if args is None else getattr(args, "batch_size", 3))
+                                batch_limit = min(current_d_batch, desktop_target - d_done)
+                                for i in range(batch_limit):
+                                    if queries_idx >= len(queries):
+                                        more_q = get_unique_search_queries(target_count=10, geo="VN")
+                                        queries.extend(more_q)
+                                    q = queries[queries_idx]
+                                    queries_idx += 1
+
+                                    # Đảm bảo d_page vẫn hoạt động trước mỗi câu tìm kiếm PC
+                                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
+
+                                    _log_info(f"[PC Search {d_done + 1}/{desktop_target}] {q[:50]}...")
+
+                                    # 3 lượt đầu tiên dùng Sidebar Search (form=PRSB01), sau đó dùng Desktop thông thường
+                                    search_type = "sidebar" if d_done < 3 else "desktop"
+                                    if execute_single_search(d_page, q, device_type=search_type):
+                                        d_done += 1
+                                        batch_completed += 1
+                                        pc_searched_round += 1
+                                        save_searched_keyword(q)
+                                        # Update session after each successful search
+                                        current_points = extract_current_points(d_page)
+                                        update_session(d_done + m_done, current_points, f"Desktop search {d_done}/{desktop_target}")
+
+                                        # Khiên Anti-Ban: kiểm tra cảnh báo giới hạn trên trang kết quả
+                                        if not safe_throttle_mode:
+                                            try:
+                                                if detect_unusual_activity_warning(d_page):
+                                                    safe_throttle_mode = True
+                                                    _log_warning("[Anti-Ban Shield] Phát hiện cảnh báo giới hạn tốc độ tìm kiếm! Chuyển sang chế độ Safe Throttle (giãn cách 35-60s/câu)...")
+                                            except Exception:
+                                                pass
+
+                                        # Giãn cách giữa các câu tìm kiếm trong batch
+                                        if d_done < desktop_target:
+                                            if safe_throttle_mode:
+                                                throttle_sleep = random.uniform(35.0, 60.0)
+                                                _log_info(f"[Safe Throttle] Giãn cách bảo vệ tài khoản: {throttle_sleep:.1f}s trước câu tiếp theo...")
+                                                time.sleep(throttle_sleep)
+                                            else:
+                                                time.sleep(random.uniform(3.0, 7.0))
+
+                                # Chạm đồng xu góc phải #id_rh ngay trên trang kết quả vừa tìm xong để mở đồng bộ điểm
+                                try:
+                                    tap_corner_rewards_coin(d_page, context_name="PC-Search")
+                                except Exception as e:
+                                    _log_debug(f"Lỗi chạm đồng xu PC-Search: {e}")
+
+                            # Nghỉ chuyển tiếp tự nhiên khi chuyển từ cụm PC sang Mobile (Transition Pause 12-30 giây)
+                            if pc_searched_round > 0 and m_done < mobile_target:
+                                trans_pause = random.randint(12, 30)
+                                _log_info(f"[Stealth] Nghỉ chuyển đổi thiết bị PC -> Mobile ({trans_pause}s)...")
+                                time.sleep(trans_pause)
+
+                            # ---- 2.2 MOBILE BATCH ----
+                            if m_done < mobile_target:
+                                try:
+                                    m_context, m_page = ensure_mobile_page(m_context, p, headless)
+
+                                    # Biến thiên kích thước batch tự nhiên 2-5 câu
+                                    current_m_batch = get_variable_batch_size(batch_size if args is None else getattr(args, "batch_size", 3))
+                                    batch_limit = min(current_m_batch, mobile_target - m_done)
+                                    for i in range(batch_limit):
+                                        if queries_idx >= len(queries):
+                                            more_q = get_unique_search_queries(target_count=10, geo="VN")
+                                            queries.extend(more_q)
+                                        q = queries[queries_idx]
+                                        queries_idx += 1
+
+                                        # Đảm bảo m_page vẫn hoạt động trước mỗi câu tìm kiếm Mobile
+                                        m_context, m_page = ensure_mobile_page(m_context, p, headless)
+
+                                        _log_info(f"[Mobile Search {m_done + 1}/{mobile_target}] {q[:50]}...")
+                                        if execute_single_search(m_page, q, device_type="mobile"):
+                                            m_done += 1
+                                            batch_completed += 1
+                                            mob_searched_round += 1
+                                            save_searched_keyword(q)
+                                            # Update session after each successful search
+                                            current_points = extract_current_points(m_page)
+                                            update_session(d_done + m_done, current_points, f"Mobile search {m_done}/{mobile_target}")
+
+                                            # Khiên Anti-Ban: kiểm tra cảnh báo giới hạn trên kết quả mobile
+                                            if not safe_throttle_mode:
+                                                try:
+                                                    if detect_unusual_activity_warning(m_page):
+                                                        safe_throttle_mode = True
+                                                        _log_warning("[Anti-Ban Shield] Phát hiện cảnh báo giới hạn tốc độ tìm kiếm! Chuyển sang chế độ Safe Throttle (giãn cách 35-60s/câu)...")
+                                                except Exception:
+                                                    pass
+
+                                            # Giãn cách giữa các câu Mobile
+                                            if m_done < mobile_target:
+                                                if safe_throttle_mode:
+                                                    throttle_sleep = random.uniform(35.0, 60.0)
+                                                    _log_info(f"[Safe Throttle] Giãn cách bảo vệ tài khoản: {throttle_sleep:.1f}s trước câu Mobile tiếp theo...")
+                                                    time.sleep(throttle_sleep)
+                                                else:
+                                                    time.sleep(random.uniform(3.0, 7.0))
+
+                                    # Chạm đồng xu góc trên giao diện di động, ép máy chủ Bing cộng điểm tìm kiếm Mobile ngay lập tức
+                                    try:
+                                        tap_corner_rewards_coin(m_page, context_name="Mobile-Search")
+                                    except Exception as e:
+                                        _log_debug(f"Lỗi chạm đồng xu Mobile-Search: {e}")
+
+                                finally:
+                                    if m_context:
+                                        try:
+                                            m_context.close()
+                                        except Exception:
+                                            pass
+                                        m_context = None
+
+                            # ---- 2.3 COOLDOWN CHECK ----
+                            # Nếu vẫn còn lượt cần tìm, kích hoạt cooldown 15 phút (Edge Browsing giới hạn 30 phút/ngày)
+                            if d_done < desktop_target or m_done < mobile_target:
+                                _log_info(f"Đã hoàn thành đợt: {batch_completed} lượt tìm kiếm.")
+                                _log_info(f"Tiến độ: Desktop {d_done}/{desktop_target} | Mobile {m_done}/{mobile_target}")
+
+                                # Log cooldown start with estimated resume time (16-24 min log-normal)
+                                cooldown = get_natural_cooldown_seconds()
+                                resume_time = datetime.datetime.now() + datetime.timedelta(seconds=cooldown)
+                                _log_info(f"[Cooldown] Bắt đầu nghỉ {cooldown // 60} phút {cooldown % 60}s. Dự kiến tiếp tục lúc: {resume_time.strftime('%H:%M:%S')}")
+                                update_session(d_done + m_done, None, f"Cooldown {cooldown // 60} minutes")
+
+                                edge_state = get_edge_browsing_state()
+                                dash_edge_done = False
+                                try:
+                                    dash_edge_done = bool(
+                                        (post_progress.get("activities", {}) if "post_progress" in locals() else initial_progress.get("activities", {}))
+                                        .get("Edge Browsing", {})
+                                        .get("done", False)
+                                    )
+                                except Exception:
+                                    dash_edge_done = False
+
+                                if dash_edge_done or edge_state["done"] or edge_state["seconds"] >= EDGE_BROWSING_CAP_SECONDS:
+                                    if dash_edge_done and not edge_state["done"]:
+                                        update_edge_browsing_state(EDGE_BROWSING_CAP_SECONDS, done=True)
+                                    _log_info("[Edge Browsing] Đã hoàn thành đủ 30/30 phút hôm nay. Bỏ qua duyệt web ngầm, nghỉ Cooldown thuần túy.")
+                                    if d_context:
+                                        try:
+                                            d_context.close()
+                                        except Exception:
+                                            pass
+                                        d_context = None
+                                        d_page = None
+                                    time.sleep(cooldown)
+                                else:
+                                    # Đảm bảo d_page sẵn sàng trước khi vào cooldown trên Desktop Edge context duy nhất
+                                    try:
+                                        d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                                    except Exception as e:
+                                        _log_warning(f"[Runner] Lỗi chuẩn bị Desktop page trước cooldown: {e}")
+
+                                    target_duration = min(cooldown, EDGE_BROWSING_CAP_SECONDS - edge_state["seconds"])
+                                    d_page, browsed_seconds = active_edge_browsing_cooldown(
+                                        d_page,
+                                        total_seconds=target_duration,
+                                        initial_seconds=edge_state["seconds"],
+                                    )
+                                    remaining_cooldown = cooldown - browsed_seconds
+                                    if remaining_cooldown > 0:
+                                        _log_info(f"[Edge Browsing] Đã chạm trần ngày, nghỉ phần Cooldown còn lại ({remaining_cooldown}s)...")
+                                        time.sleep(remaining_cooldown)
+                                _log_info("")
+
+                        # Nếu là chạy test target tùy chỉnh (ví dụ --desktop-target 1 --mobile-target 0)
+                        if is_test_target or is_explicit_test:
+                            _log_info("[Test Mode] Đã hoàn thành các lượt tìm kiếm thử nghiệm.")
+                            all_tasks_completed = True
+                            break
+
+                        # ========================================================
+                        # PHA KIỂM TRA CHÉO (DOUBLE CHECK & VERIFICATION PHASE)
+                        # ========================================================
+                        _log_info("\n" + "=" * 60)
+                        _log_info("  [Double-Check] BẮT ĐẦU PHA KIỂM TRA CHÉO TIẾN ĐỘ THỰC TẾ")
+                        _log_info("=" * 60)
+                        _log_info("[Double-Check] Ép chuyển hướng/reload lại Dashboard (rewards.bing.com/earn)...")
+
+                        try:
+                            d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                        except Exception as e:
+                            _log_warning(f"[Double-Check] Lỗi chuẩn bị Desktop page: {e}")
+
+                        try:
+                            if d_page:
+                                d_page.goto("https://rewards.bing.com/earn", wait_until="domcontentloaded", timeout=15000)
+                                d_page.wait_for_timeout(2000)
+                        except Exception as e:
+                            _log_warning(f"[Double-Check] Không thể tải /earn ({e}), thử reload...")
+                            try:
+                                if d_page:
+                                    d_page.reload(wait_until="domcontentloaded", timeout=15000)
+                                    d_page.wait_for_timeout(2000)
+                            except Exception:
+                                pass
+
+                        # Quét lại dữ liệu tiến độ thực tế
+                        re_check = get_daily_search_progress(d_page) if d_page else {"found": False, "scrape_error": True}
+                        sync_edge_browsing_from_progress(re_check)
+
+                        if re_check.get("scrape_error") or (
+                            not re_check.get("found", False)
+                            and not re_check.get("found_pc")
+                            and not re_check.get("found_mobile")
+                        ):
+                            _log_warning(
+                                "[Double-Check] [!] Không thể đọc Dashboard (Timeout/Scrape Error). "
+                                f"Giữ nguyên bộ đếm đã xác minh: Desktop {verified_pc_cur}/{verified_pc_max} | "
+                                f"Mobile {verified_mob_cur}/{verified_mob_max} (không kết luận 100% maxed)."
+                            )
+                            all_maxed = False
+                            all_tasks_completed = False
+                            break
+
+                        re_check_pc = re_check.get("pc_cur", 0)
+                        pc_max = re_check.get("pc_max", 90)
+                        re_check_mobile = re_check.get("mobile_cur", 0)
+                        mobile_max = re_check.get("mobile_max", 60)
+                        if re_check.get("found_pc"):
+                            verified_pc_cur, verified_pc_max = re_check_pc, pc_max
+                        if re_check.get("found_mobile"):
+                            verified_mob_cur, verified_mob_max = re_check_mobile, mobile_max
+                        all_maxed = re_check.get("all_maxed", False)
+                        all_activities_done = re_check.get("all_activities_done", False)
+                        re_act = re_check.get("activities", {})
+
+                        # Fallback cho thẻ Mobile App nếu server sync lag
+                        re_primary_four = re_check.get("primary_four_done", False) or (
+                            re_act.get("Bing Search", {}).get("done", False) and
+                            re_act.get("Daily Set", {}).get("done", False) and
+                            re_act.get("Edge Browsing", {}).get("done", False) and
+                            re_act.get("Visual Search", {}).get("done", False)
+                        )
+                        re_mob_done = re_act.get("Mobile App", {}).get("done", False)
+                        if not all_activities_done and re_primary_four and not re_mob_done:
+                            all_activities_done = True
+                            re_check["all_activities_done"] = True
+
+                        _log_info(f"[Double-Check] Kết quả kiểm tra chéo: Desktop {re_check_pc}/{pc_max} | Mobile {re_check_mobile}/{mobile_max}")
+
+                        is_pc_maxed = bool(re_check.get("found_pc") and re_check_pc >= pc_max)
+                        is_mob_maxed = bool(re_check.get("found_mobile") and re_check_mobile >= mobile_max)
+
+                        if is_pc_maxed and is_mob_maxed:
+                            all_maxed = True
+                            _log_info(f"[Double-Check] [✓] Dữ liệu thực tế xác nhận 100%: Desktop {re_check_pc}/{pc_max} & Mobile {re_check_mobile}/{mobile_max} đã chạm đỉnh!")
+                            if all_activities_done:
+                                all_tasks_completed = True
+                            break
+                        else:
+                            double_check_attempt += 1
+                            rem_pc = max(0, pc_max - re_check_pc) if re_check.get("found_pc") else 0
+                            rem_mob = max(0, mobile_max - re_check_mobile) if re_check.get("found_mobile") else 0
+                            extra_pc = (rem_pc + 2) // 3
+                            extra_mob = (rem_mob + 2) // 3
+
+                            _log_warning(f"[Double-Check] Dữ liệu thực tế CHƯA chạm đỉnh! Còn thiếu: Desktop {rem_pc} pts (~{extra_pc} câu), Mobile {rem_mob} pts (~{extra_mob} câu).")
+
+                            if double_check_attempt > max_double_check_retries:
+                                _log_warning(f"[Double-Check] Đã bù {max_double_check_retries} đợt nhưng server chưa cập nhật đủ (có thể do Cooldown/Rate-limit). Dừng chu trình để bảo vệ tài khoản.")
+                                all_tasks_completed = False
+                                all_maxed = False
+                                break
+
+                            _log_info(f"[Double-Check] Tự động bù thêm số lượt còn thiếu (Đợt bù {double_check_attempt}/{max_double_check_retries}): +{extra_pc} PC, +{extra_mob} Mobile...")
+                            desktop_target = d_done + extra_pc
+                            mobile_target = m_done + extra_mob
+
+                finally:
+                    if d_context:
+                        try:
+                            d_context.close()
+                        except Exception:
+                            pass
+                        d_context = None
+
+            # ========================================================
+            # BƯỚC 3: TỔNG KẾT & GHI LOG
+            # ========================================================
+            _log_info("[3/3] Đang lấy điểm số tổng kết...")
+            if all_tasks_completed and (d_done + m_done == 0):
+                end_points = start_points
+                _log_info(f"Điểm số kết thúc: {end_points:,}")
+            else:
+                try:
+                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
+                    d_page.goto(REWARDS_URL, wait_until="domcontentloaded")
+                    dismiss_popups(d_page)
+                    
+                    # Chờ 2 giây để API Bing tải điểm số mới nhất
+                    d_page.wait_for_timeout(2000)
+                    
+                    end_points = extract_current_points(d_page)
+                    _log_info(f"Điểm số kết thúc: {end_points:,}")
+                    try:
+                        star_info = extract_bing_star_bonus(d_page)
+                        if star_info.get("found"):
+                            bing_star_bonus_str = star_info.get("text", bing_star_bonus_str)
+                    except Exception:
+                        pass
+                finally:
+                    if d_context:
+                        try:
+                            d_context.close()
+                        except Exception:
+                            pass
+                        d_context = None
+
+            # Ghi log kết quả
+            total_searches = d_done + m_done
+            log_session_result(start_points, end_points, total_searches)
+            
+            # Chỉ coi là hoàn tất khi dữ liệu thực tế xác nhận 100%
+            status_str = "completed" if (all_maxed and all_activities_done) else "partial"
+            finish_session(end_points, status=status_str)
+
+            today_str = datetime.date.today().isoformat()
+            can_lock_day = all_maxed and all_activities_done
+            if can_lock_day:
+                _log_info("[Daily Lock] Đã hoàn thành 100% mục tiêu. Ghi nhận khóa ngày vào daily_state.json.")
+                save_daily_state(
+                    completed_date=today_str,
+                    partial=False,
+                    checkin_awarded=checkin_awarded,
+                )
+            else:
+                _log_info(
+                    f"[Daily Lock] Còn nhiệm vụ/điểm chưa đạt 100% "
+                    f"(all_maxed={all_maxed}, all_activities_done={all_activities_done}, "
+                    f"checkin +{checkin_awarded} pts). Ghi nhận tiến độ một phần để chu kỳ sau cày tiếp."
+                )
+                save_daily_state(
+                    completed_date=today_str,
+                    partial=True,
+                    checkin_awarded=checkin_awarded,
+                )
+
+            # Sổ cái thống kê điểm số & Dự báo đổi quà
+            earned = max(0, end_points - start_points)
+            try:
+                update_points_ledger(total_points=end_points, earned_today=earned, bing_star_bonus=bing_star_bonus_str)
+            except Exception as e:
+                _log_warning(f"Lỗi khi cập nhật points_ledger: {e}")
+
+            # In tóm tắt
+            _log_info("\n" + "=" * 60)
+            if all_tasks_completed:
+                _log_info("  HOÀN TẤT TOÀN BỘ PIPELINE PHASE 5!")
+            else:
+                _log_info("  KẾT THÚC ĐỢT PIPELINE (CHƯA ĐẠT ĐỦ TARGET)")
+            _log_info("=" * 60)
+            _log_info(f"  Điểm đầu:     {start_points:,}")
+            _log_info(f"  Điểm cuối:    {end_points:,}")
+            _log_info(f"  Kiếm được:    +{earned:,} pts")
+            _log_info(f"  Desktop:      {d_done}/{desktop_target} searches")
+            _log_info(f"  Mobile:       {m_done}/{mobile_target} searches")
+            _log_info(f"  Tổng searches: {total_searches}")
+            _log_info("=" * 60)
+
+            return all_tasks_completed
+
+    except Exception as e:
+        _log_error(f"Pipeline error: {e}")
+        _log_exception("Full traceback:")
+        finish_session(0, status="failed", error_msg=str(e))
+        return False
+    finally:
+        try:
+            if d_context:
+                d_context.close()
+        except Exception:
+            pass
+        try:
+            if m_context:
+                m_context.close()
+        except Exception:
+            pass
+        try:
+            unload_model_from_vram()
+        except Exception:
+            pass
+        try:
+            cleanup_zombie_browsers()
+        except Exception:
+            pass
+        try:
+            purge_profile_caches()
+        except Exception:
+            pass
+
+
+# ==================== NETWORK & STATE & CACHE GUARD ====================
+POINTS_LEDGER_FILE = DATA_DIR / "points_ledger.json"
+
+REWARDS_MILESTONES = [
+    {"name": "Roblox Digital Card (100 Robux)", "points": 1500},
+    {"name": "Thẻ nạp điện thoại Viettel/Mobi/Vina 50.000đ", "points": 3400},
+    {"name": "Voucher Got It / Shopee / Tiki 100.000đ", "points": 6500},
+    {"name": "Xbox Game Pass PC (1 Tháng)", "points": 7750},
+    {"name": "Voucher Điện Máy XANH / TGDD 200.000đ", "points": 13000},
+]
+
+
+def _read_lock_pid(lock_path: Path) -> str:
+    """Best-effort read of PID stored in runner.lock."""
+    try:
+        raw = lock_path.read_text(encoding="utf-8", errors="ignore").strip()
+        if not raw:
+            return "unknown"
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and data.get("pid"):
+                return str(data["pid"])
+        except Exception:
+            pass
+        for token in raw.replace(":", " ").replace("=", " ").split():
+            if token.isdigit():
+                return token
+    except Exception:
+        pass
+    return "unknown"
+
+
+def acquire_runner_lock(lock_path: Path = LOCK_FILE):
+    """
+    Acquire an exclusive non-blocking OS file lock at data/locks/runner.lock.
+    Returns open file handle on success, or None if another live instance holds the lock.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_path, "a+", encoding="utf-8")
+    try:
+        f.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        pid = _read_lock_pid(lock_path)
+        _log_info(
+            f"[Process Guard] Another bot instance (PID {pid}) is already running. "
+            "Exiting cleanly without killing active browsers."
+        )
+        try:
+            f.close()
+        except Exception:
+            pass
+        return None
+
+    try:
+        f.seek(0)
+        f.truncate(0)
+        f.write(json.dumps({
+            "pid": os.getpid(),
+            "started_at": datetime.datetime.now().isoformat(),
+        }))
+        f.flush()
+    except Exception:
+        pass
+    return f
+
+
+def release_runner_lock(lock_handle) -> None:
+    """Release and close the exclusive OS file lock."""
+    if lock_handle is None:
+        return
+    try:
+        lock_handle.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        lock_handle.close()
+    except Exception:
+        pass
+
+
+def is_sibling_runner_active() -> bool:
+    """Return True if another runner.py process is currently running."""
+    if not psutil:
+        return False
+    my_pid = os.getpid()
+    try:
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                pid = proc.info.get("pid")
+                if not pid or pid == my_pid:
+                    continue
+                name = (proc.info.get("name") or "").lower()
+                if name not in ("python.exe", "pythonw.exe", "python", "python3"):
+                    continue
+                cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+                if "runner.py" in cmdline:
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def cleanup_zombie_browsers():
+    """
+    Tự động kiểm tra và đóng các tiến trình msedge.exe headless bị treo từ phiên trước
+    có --user-data-dir trỏ vào thư mục profiles/ của bot (tuyệt đối không chạm Edge của người dùng).
+    """
+    _log_info("[Process Guard] Kiểm tra và dọn dẹp các tiến trình Edge headless treo trong profiles/...")
+    killed_count = 0
+    profiles_root = str((ROOT_DIR / "profiles").resolve()).lower().replace("/", "\\")
+    try:
+        if psutil:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['name'] and proc.info['name'].lower() == 'msedge.exe':
+                        cmdline = " ".join(proc.info.get('cmdline') or []).lower().replace("/", "\\")
+                        if "--user-data-dir" in cmdline and profiles_root in cmdline:
+                            proc.kill()
+                            killed_count += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+    except Exception as e:
+        _log_debug(f"[Process Guard] Lỗi khi dọn tiến trình Edge: {e}")
+
+    if killed_count > 0:
+        _log_info(f"[Process Guard] Đã dọn dẹp {killed_count} tiến trình msedge.exe giải phóng khóa profiles.")
+    else:
+        _log_info("[Process Guard] Không có tiến trình Edge bot nào bị treo.")
+
+
+def wait_for_internet(host: str = "www.bing.com", port: int = 443, timeout: int = 60) -> bool:
+    """
+    Trước khi khởi tạo Playwright, chờ kết nối tới host:port (mặc định www.bing.com:443)
+    tối đa 60 giây (mỗi nhịp 3 giây) để tránh lỗi mất mạng khi máy vừa thức dậy từ Sleep.
+    """
+    _log_info(f"[Network Guard] Kiểm tra kết nối Internet ({host}:{port})...")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            with socket.create_connection((host, port), timeout=3.0):
+                elapsed = time.time() - start_time
+                _log_info(f"[Network Guard] Kết nối Internet ổn định ({elapsed:.1f}s)!")
+                return True
+        except (socket.timeout, OSError) as e:
+            remaining = int(timeout - (time.time() - start_time))
+            if remaining > 0:
+                _log_debug(f"[Network Guard] Đang chờ mạng ({e}). Còn lại {remaining}s (thử lại sau 3s)...")
+                time.sleep(3)
+    _log_warning(f"[Network Guard] Hết thời gian chờ mạng ({timeout}s)!")
+    return False
+
+
+def is_today_already_completed() -> bool:
+    """
+    Kiểm tra xem hôm nay đã hoàn thành 100% mục tiêu chưa (dựa trên data/daily_state.json).
+    """
+    if not DAILY_STATE_FILE.exists():
+        return False
+    try:
+        with open(DAILY_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        today_str = datetime.date.today().isoformat()
+        return data.get("completed_date") == today_str and data.get("status") == "completed"
+    except Exception as e:
+        _log_warning(f"[Daily Lock] Lỗi khi đọc daily_state.json: {e}")
+        return False
+
+
+def _load_daily_state_raw() -> dict:
+    if not DAILY_STATE_FILE.exists():
+        return {}
+    try:
+        with open(DAILY_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_edge_browsing_state(today_str: str = None) -> dict:
+    """Đọc tiến độ Edge Browsing hôm nay từ data/daily_state.json."""
+    today = today_str or datetime.date.today().isoformat()
+    data = _load_daily_state_raw()
+    if data.get("date") != today and data.get("completed_date") != today:
+        return {"date": today, "seconds": 0, "done": False}
+    return {
+        "date": today,
+        "seconds": int(data.get("edge_browsing_seconds", 0) or 0),
+        "done": bool(data.get("edge_browsing_done", False)),
+    }
+
+
+def update_edge_browsing_state(seconds: int, done: bool = False, today_str: str = None) -> None:
+    """Lưu tiến độ tích lũy Edge Browsing (giây & trạng thái hoàn thành) vào data/daily_state.json."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        today = today_str or datetime.date.today().isoformat()
+        now_iso = datetime.datetime.now().isoformat()
+        data = _load_daily_state_raw()
+        if data.get("date") != today and data.get("completed_date") != today:
+            state = {"completed_date": None, "completed_at": None, "status": "partial"}
+        else:
+            state = data
+
+        prev_secs = int(state.get("edge_browsing_seconds", 0) or 0)
+        new_secs = max(prev_secs, min(EDGE_BROWSING_CAP_SECONDS, int(seconds)))
+        is_done = bool(done or state.get("edge_browsing_done", False) or new_secs >= EDGE_BROWSING_CAP_SECONDS)
+        if is_done:
+            new_secs = max(new_secs, EDGE_BROWSING_CAP_SECONDS)
+
+        state.update({
+            "date": today,
+            "edge_browsing_seconds": new_secs,
+            "edge_browsing_done": is_done,
+            "updated_at": now_iso,
+        })
+        with open(DAILY_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        _log_warning(f"[Edge Browsing] Lỗi khi lưu tiến độ vào daily_state.json: {e}")
+
+
+def sync_edge_browsing_from_progress(progress: dict) -> None:
+    """Nếu Dashboard báo Edge Browsing đã 30/30 [✓], khóa ngay vào daily_state.json."""
+    if not isinstance(progress, dict):
+        return
+    edge_info = (progress.get("activities") or {}).get("Edge Browsing") or {}
+    if edge_info.get("done", False):
+        update_edge_browsing_state(EDGE_BROWSING_CAP_SECONDS, done=True)
+
+
+def save_daily_state(completed_date: str = None, partial: bool = False, checkin_awarded: int = 0):
+    """
+    Ghi nhận trạng thái ngày hiện tại vào data/daily_state.json.
+    - partial=False: đã hoàn thành 100% mục tiêu (PC, Mobile, 4 nhiệm vụ cốt lõi: Bing Search, Daily Set, Edge Browsing, Visual Search).
+    - partial=True: ghi nhận tiến độ một phần để chu kỳ sau tiếp tục cày.
+    """
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        today_str = completed_date or datetime.date.today().isoformat()
+        now_iso = datetime.datetime.now().isoformat()
+
+        state = {"completed_date": None, "completed_at": None, "status": "partial"}
+        if DAILY_STATE_FILE.exists():
+            try:
+                with open(DAILY_STATE_FILE, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                if existing.get("completed_date") == today_str or existing.get("date") == today_str:
+                    state = existing
+            except Exception:
+                pass
+
+        state.update({
+            "date": today_str,
+            "partial": partial,
+            "checkin_awarded": checkin_awarded,
+            "edge_browsing_seconds": int(state.get("edge_browsing_seconds", 0) or 0),
+            "edge_browsing_done": bool(state.get("edge_browsing_done", False)),
+            "updated_at": now_iso,
+        })
+        if not partial:
+            state["completed_date"] = today_str
+            state["completed_at"] = now_iso
+            state["status"] = "completed"
+
+        with open(DAILY_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+
+        if partial:
+            _log_info(
+                f"[Daily Lock] Ghi nhận tiến độ một phần ngày {today_str} "
+                f"(checkin +{checkin_awarded} pts)."
+            )
+        else:
+            _log_info(f"[Daily Lock] Đã ghi nhận hoàn tất 100% ngày hôm nay ({today_str}) vào data/daily_state.json.")
+    except Exception as e:
+        _log_warning(f"[Daily Lock] Lỗi khi ghi daily_state.json: {e}")
+
+
+mark_today_completed = save_daily_state
+
+
+def update_points_ledger(total_points: int, earned_today: int, bing_star_bonus: str = None):
+    """
+    Lưu thống kê điểm số vào data/points_ledger.json và in ra bảng tổng kết chuyên nghiệp:
+    Điểm kiếm được hôm nay, Tổng điểm hiện có, Bing Star bonus, và ước tính tiến độ đổi mốc quà tiếp theo.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    today_str = datetime.date.today().isoformat()
+    now_iso = datetime.datetime.now().isoformat()
+
+    ledger = {"last_updated": now_iso, "history": []}
+    if POINTS_LEDGER_FILE.exists():
+        try:
+            with open(POINTS_LEDGER_FILE, "r", encoding="utf-8") as f:
+                ledger = json.load(f)
+        except Exception as e:
+            _log_warning(f"[Points Ledger] Lỗi khi đọc points_ledger.json: {e}")
+
+    # Xác định giá trị bing_star_bonus
+    if not bing_star_bonus:
+        bing_star_bonus = ledger.get("bing_star_bonus") or "0 / 2,100"
+
+    history = ledger.get("history", [])
+    today_entry = next((item for item in history if item.get("date") == today_str), None)
+    if today_entry:
+        today_entry["total_points"] = total_points
+        today_entry["earned_today"] = max(today_entry.get("earned_today", 0), earned_today)
+        today_entry["bing_star_bonus"] = bing_star_bonus
+        today_entry["updated_at"] = now_iso
+    else:
+        history.append({
+            "date": today_str,
+            "total_points": total_points,
+            "earned_today": earned_today,
+            "bing_star_bonus": bing_star_bonus,
+            "updated_at": now_iso,
+        })
+    ledger["last_updated"] = now_iso
+    ledger["total_points"] = total_points
+    ledger["earned_today"] = earned_today
+    ledger["bing_star_bonus"] = bing_star_bonus
+    ledger["history"] = history
+
+    try:
+        with open(POINTS_LEDGER_FILE, "w", encoding="utf-8") as f:
+            json.dump(ledger, f, indent=2, ensure_ascii=False)
+        _log_info("[Points Ledger] Đã cập nhật sổ cái điểm thưởng vào data/points_ledger.json.")
+    except Exception as e:
+        _log_warning(f"[Points Ledger] Lỗi khi ghi points_ledger.json: {e}")
+
+    # Tính toán mốc đổi quà tiếp theo
+    target_milestone = None
+    for m in REWARDS_MILESTONES:
+        if m["points"] > total_points:
+            target_milestone = m
+            break
+    if not target_milestone:
+        target_milestone = REWARDS_MILESTONES[-1]
+
+    m_name = target_milestone["name"]
+    m_pts = target_milestone["points"]
+    needed_pts = max(0, m_pts - total_points)
+    progress_pct = min(100.0, (total_points / m_pts) * 100) if m_pts > 0 else 100.0
+
+    # Ước tính số ngày
+    avg_daily_rate = 150
+    if len(history) > 1:
+        rates = [h.get("earned_today", 0) for h in history if h.get("earned_today", 0) > 0]
+        if rates:
+            avg_daily_rate = max(50, sum(rates) // len(rates))
+    est_days = max(1, math.ceil(needed_pts / avg_daily_rate)) if needed_pts > 0 else 0
+
+    # Vẽ thanh tiến độ trực quan (20 ký tự)
+    bar_len = 20
+    filled_len = int(bar_len * (progress_pct / 100.0))
+    bar_str = "█" * filled_len + "░" * (bar_len - filled_len)
+
+    # In bảng tổng kết chuyên nghiệp
+    _log_info("")
+    _log_info("=" * 72)
+    _log_info("           BẢNG TỔNG KẾT ĐIỂM SỐ & DỰ BÁO ĐỔI QUÀ (REWARDS LEDGER)")
+    _log_info("=" * 72)
+    _log_info(f"  * Ngày thực hiện:          {today_str}")
+    _log_info(f"  * Điểm kiếm được hôm nay:  +{earned_today:,} pts")
+    _log_info(f"  * Tổng điểm hiện có:       {total_points:,} pts")
+    _log_info(f"  * Bing Star Bonus tháng này: {bing_star_bonus} pts")
+    _log_info(f"  * Mốc đổi quà tiếp theo:   {m_name} ({m_pts:,} pts)")
+    _log_info(f"  * Tiến độ hiện tại:        [{bar_str}] {progress_pct:.1f}%")
+    if needed_pts > 0:
+        _log_info(f"  * Còn thiếu:               {needed_pts:,} pts (Dự kiến đạt trong ~{est_days} ngày với ~{avg_daily_rate} pts/ngày)")
+    else:
+        _log_info("  * Trạng thái:              [✓] ĐÃ ĐẠT ĐỦ ĐIỂM ĐỔI QUÀ!")
+    _log_info("=" * 72)
+    _log_info("")
+
+
+def _get_dir_size_bytes(folder: Path) -> int:
+    """Tính tổng dung lượng (bytes) của một thư mục cache."""
+    total = 0
+    try:
+        for entry in folder.rglob("*"):
+            if entry.is_file():
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def purge_profile_caches(
+    profiles_dir: str = "profiles",
+    max_age_days: int = 7,
+    max_total_mb: int = 500,
+):
+    """
+    Smart SSD Guard: Giữ warm cache trong profiles/ để trình duyệt có cache tự nhiên qua từng ngày.
+    Chỉ xóa thư mục cache khi:
+    - Thư mục cũ hơn `max_age_days` (mặc định 7 ngày), HOẶC
+    - Tổng dung lượng cache vượt ngưỡng `max_total_mb` (mặc định 500 MB, xóa từ cũ nhất trước).
+    Luôn giữ nguyên Cookies và Local Storage.
+    """
+    junk_folder_names = {
+        "Cache",
+        "Code Cache",
+        "GPUCache",
+        "DawnCache",
+        "DawnGraphiteCache",
+        "DawnWebGPUCache",
+        "GPUPersistentCache",
+        "GrShaderCache",
+        "ShaderCache",
+        "Crashpad",
+    }
+    profiles_path = Path(profiles_dir)
+    if not profiles_path.is_absolute():
+        profiles_path = ROOT_DIR / profiles_dir
+
+    if not profiles_path.exists():
+        return
+
+    now = time.time()
+    max_age_seconds = max_age_days * 86400
+    max_total_bytes = max_total_mb * 1024 * 1024
+
+    junk_dirs = [folder for folder in profiles_path.rglob("*") if folder.is_dir() and folder.name in junk_folder_names]
+    freed_count = 0
+    surviving: list[tuple[float, int, Path]] = []
+
+    # 1. Xóa các thư mục cache quá hạn (cũ hơn max_age_days)
+    for folder in junk_dirs:
+        if not folder.exists():
+            continue
+        try:
+            mtime = folder.stat().st_mtime
+        except OSError:
+            mtime = now
+        age_seconds = now - mtime
+        if age_seconds > max_age_seconds:
+            try:
+                shutil.rmtree(folder, ignore_errors=True)
+                freed_count += 1
+            except Exception:
+                pass
+        else:
+            surviving.append((mtime, _get_dir_size_bytes(folder), folder))
+
+    # 2. Nếu tổng dung lượng cache còn lại vượt ngưỡng max_total_mb, xóa từ cũ nhất đến khi đạt ngưỡng
+    total_bytes = sum(size for _, size, _ in surviving)
+    if total_bytes > max_total_bytes:
+        surviving.sort(key=lambda item: item[0])  # cũ nhất trước
+        remaining: list[tuple[float, int, Path]] = []
+        for mtime, size, folder in surviving:
+            if total_bytes > max_total_bytes and folder.exists():
+                try:
+                    shutil.rmtree(folder, ignore_errors=True)
+                    freed_count += 1
+                    total_bytes -= size
+                except Exception:
+                    remaining.append((mtime, size, folder))
+            else:
+                remaining.append((mtime, size, folder))
+        surviving = remaining
+
+    total_mb = total_bytes / (1024 * 1024)
+    if freed_count > 0:
+        logger.info(
+            f"[SSD Guard] Đã dọn {freed_count} thư mục cache (quá {max_age_days} ngày hoặc >{max_total_mb} MB). "
+            f"Còn lại {total_mb:.1f} MB warm cache."
+        )
+    else:
+        logger.info(
+            f"[SSD Guard] Giữ nguyên warm cache ({total_mb:.1f} MB <= {max_total_mb} MB, < {max_age_days} ngày)."
+        )
+
+
+purge_browser_cache = purge_profile_caches
+
+
+# ==================== POWER MANAGEMENT ====================
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+def is_user_active(threshold_seconds: int = 120) -> bool:
+    """
+    Kiểm tra xem người dùng có đang hoạt động trên máy (chuột/bàn phím có tương tác trong vòng threshold_seconds hay không).
+    Sử dụng Windows API GetLastInputInfo.
+    """
+    try:
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            idle_ms = ctypes.windll.kernel32.GetTickCount() - info.dwTime
+            if idle_ms < 0:
+                idle_ms += 0x100000000
+            return (idle_ms / 1000.0) < threshold_seconds
+    except Exception:
+        pass
+    return False
+
+
+def put_pc_to_sleep():
+    """Tự động đưa máy tính vào chế độ Sleep (S3) để tiết kiệm điện."""
+    if is_sibling_runner_active():
+        logger.info("[Auto-Sleep] Phát hiện phiên runner.py khác đang hoạt động. Hủy lệnh Sleep!")
+        return
+    if is_user_active(threshold_seconds=120):
+        logger.info("[Auto-Sleep] Phát hiện người dùng đang sử dụng máy tính. Hủy lệnh Sleep để không làm gián đoạn công việc!")
+        return
+
+    # Dọn dẹp cache rác rà soát lần cuối ngay trước khi máy ngủ để bảo vệ TBW SSD
+    try:
+        purge_browser_cache()
+    except Exception:
+        pass
+
+    logger.info("[Power] Chuẩn bị đưa máy vào chế độ Sleep sau 10 giây...")
+    for remaining in range(10, 0, -1):
+        if is_user_active(threshold_seconds=5):
+            logger.info("[Auto-Sleep] Phát hiện người dùng đang sử dụng máy tính. Hủy lệnh Sleep để không làm gián đoạn công việc!")
+            return
+        logger.info(f"[Power] Đang đếm ngược đưa máy vào Sleep: {remaining}s...")
+        time.sleep(1)
+    # Lệnh chuẩn của PowerShell đưa Windows vào trạng thái Suspend/Sleep
+    cmd = 'powershell -Command "Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)"'
+    subprocess.run(cmd, shell=True)
+
+
+CIRCADIAN_START_HOUR = 7
+CIRCADIAN_START_MINUTE = 0
+CIRCADIAN_END_HOUR = 22
+CIRCADIAN_END_MINUTE = 30
+
+
+def is_within_circadian_window(now: datetime.datetime = None) -> bool:
+    """Kiểm tra thời gian địa phương có nằm trong khung giờ sinh hoạt tự nhiên (07:00 - 22:30) hay không."""
+    current = now if now is not None else datetime.datetime.now()
+    current_minutes = current.hour * 60 + current.minute
+    start_minutes = CIRCADIAN_START_HOUR * 60 + CIRCADIAN_START_MINUTE
+    end_minutes = CIRCADIAN_END_HOUR * 60 + CIRCADIAN_END_MINUTE
+    return start_minutes <= current_minutes <= end_minutes
+
+
+def main():
+    import os
+    import psutil
+
+    lock_handle = acquire_runner_lock()
+    if lock_handle is None:
+        sys.exit(0)
+
+    try:
+        # Đặt độ ưu tiên của tiến trình xuống mức Dưới Trung Bình (Below Normal)
+        try:
+            p = psutil.Process(os.getpid())
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
+
+        try:
+            cleanup_zombie_browsers()
+        except Exception:
+            pass
+
+        parser = argparse.ArgumentParser(
+            description="MS Rewards Bot Phase 5 - Full Automation (Streak + Search + Logging)",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Ví dụ sử dụng:
+  python runner.py                    # Chạy mặc định (headless, 30D/20M, tự động Sleep khi hoàn tất)
+  python runner.py --debug            # Chạy có giao diện (debug)
+  python runner.py --no-sleep         # Chạy không tự động Sleep máy
+  python runner.py --daemon           # Chạy nền liên tục (kiểm tra mỗi 4h)
+  python runner.py --desktop-target 30 --mobile-target 20 --batch-size 4
+            """
+        )
+        parser.add_argument("--debug", action="store_true", 
+                            help="Chạy có giao diện trình duyệt (headless=False)")
+        parser.add_argument("--desktop-target", type=int, default=30,
+                            help="Số lượt tìm kiếm Desktop mục tiêu (mặc định: 30)")
+        parser.add_argument("--mobile-target", type=int, default=20,
+                            help="Số lượt tìm kiếm Mobile mục tiêu (mặc định: 20)")
+        parser.add_argument("--batch-size", type=int, default=3,
+                            help="Kích thước batch mỗi lần trước cooldown (mặc định: 3)")
+        parser.add_argument(
+            "--daemon", "--loop",
+            dest="daemon",
+            action="store_true", 
+            help="Chạy ở chế độ tiến trình nền liên tục, tự động ngủ 4 tiếng sau khi xong toàn bộ việc."
+        )
+        parser.add_argument(
+            "--interval", 
+            type=float, 
+            default=4, 
+            help="Khoảng thời gian ngủ giữa các chu kỳ kiểm tra (tính bằng giờ, mặc định 4h)."
+        )
+        parser.add_argument(
+            "--auto-sleep",
+            action="store_true",
+            default=True,
+            help="Tự động đưa máy tính vào chế độ Sleep khi hoàn thành tất cả nhiệm vụ (mặc định bật)."
+        )
+        parser.add_argument(
+            "--no-sleep",
+            dest="auto_sleep",
+            action="store_false",
+            help="Vô hiệu hóa tính năng tự động Sleep khi hoàn tất."
+        )
+        parser.add_argument(
+            "--retry-count",
+            type=int,
+            default=0,
+            help="Số lần thử lại trong ngày (mặc định 0)"
+        )
+        parser.add_argument(
+            "--force-hours",
+            action="store_true",
+            help="Bỏ qua Circadian Guard để chạy ngoài khung giờ 07:00 - 22:30."
+        )
+        
+        args = parser.parse_args()
+
+        if not args.force_hours and not is_within_circadian_window():
+            logger.info("[Circadian Guard] Ngoài khung giờ sinh hoạt tự nhiên (07:00 - 22:30), tạm hoãn phiên chạy.")
+            sys.exit(0)
+
+        check_interval_seconds = int(args.interval * 3600)
+        interval_display = f"{int(args.interval)}" if (isinstance(args.interval, int) or args.interval.is_integer()) else f"{args.interval}"
+
+        all_completed = False
+        try:
+            while True:
+                logger.info("============================================================")
+                logger.info("   Microsoft Rewards Bot - Phase 8.4 High-Efficiency Stealth Automation")
+                logger.info(f"   BẮT ĐẦU CHU KỲ KIỂM TRA & CÀY ĐIỂM: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info("============================================================")
+                
+                # Thực thi toàn bộ pipeline
+                all_completed = run_full_pipeline(args)
+
+                # Nếu không bật cờ --daemon, chạy xong 1 phiên thì thoát như cũ
+                if not args.daemon:
+                    break
+
+                # Nếu bật cờ --daemon:
+                wake_time = datetime.datetime.now() + datetime.timedelta(seconds=check_interval_seconds)
+                wake_str = wake_time.strftime("%H:%M:%S ngày %d/%m/%Y")
+
+                if all_completed:
+                    logger.info("============================================================")
+                    logger.info("  [✓] TOÀN BỘ NHIỆM VỤ ĐÃ HOÀN TẤT XUẤT SẮC!")
+                    logger.info("  [*] Đã đóng toàn bộ trình duyệt để giải phóng 100% RAM/GPU.")
+                    logger.info(f"  [*] Bot chuyển sang chế độ ngủ sâu. Sẽ kiểm tra lại lúc: {wake_str} (sau {interval_display}h)")
+                    logger.info("============================================================\n")
+                else:
+                    logger.info(f"[*] Chưa đạt hết chỉ tiêu, tạm nghỉ {interval_display}h và sẽ thử lại lúc: {wake_str}\n")
+
+                # Ngủ tiết kiệm tài nguyên (chia nhỏ 60s để phản hồi tốt nếu có lệnh ngắt)
+                start_sleep = time.time()
+                if check_interval_seconds > 0:
+                    while time.time() - start_sleep < check_interval_seconds:
+                        time.sleep(min(60, check_interval_seconds - (time.time() - start_sleep)))
+                else:
+                    time.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("\nNhận tín hiệu dừng (Ctrl+C). Đang tắt bot...")
+            try:
+                cleanup_zombie_browsers()
+            except Exception:
+                pass
+            try:
+                purge_browser_cache()
+            except Exception:
+                pass
+            sys.exit(0)
+
+        if all_completed and getattr(args, "auto_sleep", False):
+            if is_sibling_runner_active():
+                logger.info("[Auto-Sleep] Phát hiện phiên runner.py khác đang hoạt động. Hủy lệnh Sleep!")
+            elif is_user_active(threshold_seconds=120):
+                logger.info("[Auto-Sleep] Phát hiện người dùng đang sử dụng máy tính. Hủy lệnh Sleep để không làm gián đoạn công việc!")
+            else:
+                logger.info("[Auto-Sleep] Máy tính đang ở trạng thái không người dùng. Chuẩn bị đưa máy vào chế độ Sleep...")
+                put_pc_to_sleep()
+
+        # Nếu pipeline chạy trọn vẹn (dù còn thẻ phụ chờ chu kỳ sau cày tiếp), luôn exit 0 để script .bat không bị treo
+        all_activities_done = all_completed
+        if not all_activities_done:
+            _log_info("[Runner] Còn hoạt động phụ chưa đạt 100%, bot sẽ tiếp tục ở chu kỳ kế tiếp.")
+        sys.exit(0)
+    finally:
+        release_runner_lock(lock_handle)
+
+
+if __name__ == "__main__":
+    main()

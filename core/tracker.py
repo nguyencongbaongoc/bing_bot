@@ -7,6 +7,7 @@ Module theo dõi điểm số Microsoft Rewards và ghi log lịch sử.
 
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -24,15 +25,22 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 BOT_LOG_FILE = LOGS_DIR / "bot.log"
 HISTORY_JSON = LOGS_DIR / "history.json"
 
+
+def _is_testing_mode() -> bool:
+    return ("unittest" in sys.modules) or (os.environ.get("REWARDS_BOT_TESTING") == "1")
+
+
 # Configure logging - both file and console with immediate flush
 _logger = logging.getLogger("ms_rewards_bot")
 _logger.setLevel(logging.DEBUG)
 
-# File handler
-_file_handler = logging.FileHandler(BOT_LOG_FILE, encoding="utf-8")
-_file_handler.setLevel(logging.DEBUG)
+# File handler (suppressed during unit tests so mock logs never pollute logs/bot.log)
 _file_formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-_file_handler.setFormatter(_file_formatter)
+_file_handler = None
+if not _is_testing_mode():
+    _file_handler = logging.FileHandler(BOT_LOG_FILE, encoding="utf-8")
+    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setFormatter(_file_formatter)
 
 # Console handler with flush
 _console_handler = logging.StreamHandler(sys.stdout)
@@ -42,7 +50,8 @@ _console_handler.setFormatter(_console_formatter)
 
 # Avoid duplicate handlers if module reloads
 if not _logger.handlers:
-    _logger.addHandler(_file_handler)
+    if _file_handler is not None:
+        _logger.addHandler(_file_handler)
     _logger.addHandler(_console_handler)
 
 logger = _logger
@@ -80,18 +89,20 @@ def extract_current_points(page: Page) -> int:
         pass
 
     selectors = [
-        "#id_rc",                    # Số điểm trên thanh header Bing Search
+        "#id_rc",                    # Số điểm trên thanh header Bing Search (Desktop & Mobile)
         "#flyout_id_rc",             # Mobile Bing Rewards points
         ".b_id_rc",
         "#rh_meter",
+        "#id_rh",
         "[id*='reward_points']",
         "span[class*='pointsValue']",
         "header div[class*='points']",
         "button[aria-label*='points' i]",
         "#b_header [aria-label*='Rewards' i]",
+        "a[aria-label*='Rewards' i]",
         "header button:has(img[src*='Medals'])",
         "header button:has(img[alt='Member'])",
-        "#flyout-points"
+        "#flyout-points",
     ]
     for sel in selectors:
         try:
@@ -104,12 +115,12 @@ def extract_current_points(page: Page) -> int:
                     visible = False
                 text = (elem.inner_text() if visible else (elem.text_content() or "")).strip()
                 if not text:
-                    text = elem.get_attribute("aria-label") or elem.get_attribute("title") or ""
-                # Loại bỏ dấu phẩy/chấm phân tách hàng nghìn (ví dụ: 1,250 -> 1250)
+                    text = (elem.get_attribute("aria-label") or elem.get_attribute("title") or "").strip()
+                if not text:
+                    continue
+                # Loại bỏ dấu phẩy/chấm phân tách hàng nghìn (ví dụ: 1,250 hoặc 1.250 -> 1250)
                 clean_text = text.replace(",", "").replace(".", "")
-                nums = [int(s) for s in clean_text.split() if s.isdigit()]
-                if not nums:
-                    nums = [int(s) for s in re.findall(r'\d+', clean_text)]
+                nums = [int(s) for s in re.findall(r'\d+', clean_text)]
                 if nums:
                     return nums[0]
         except Exception:

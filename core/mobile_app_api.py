@@ -56,6 +56,12 @@ OAUTH_FILE = DATA_DIR / "mobile_oauth.json"
 DEBUG_DAPI_FILE = DATA_DIR / "debug_dapi_me.json"
 
 
+def set_oauth_file(path: Path | str) -> None:
+    """Configure per-account OAuth token cache file."""
+    global OAUTH_FILE
+    OAUTH_FILE = Path(path)
+
+
 def get_mobile_access_token(page: Optional[Page] = None) -> Optional[str]:
     """
     Lấy hoặc làm mới Mobile Access Token cho Bing Mobile App API.
@@ -400,12 +406,20 @@ def _submit_checkin_activity(headers: dict, country: str, offer_id: Optional[str
     }
 
 
-def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "vn") -> int:
+def solve_mobile_app_daily_checkin(
+    page: Optional[Page] = None,
+    country: str = "vn",
+    state_store=None,
+) -> int:
     """
     Thực hiện Điểm danh 7 ngày (Daily Check-in - type 103) qua Bing Mobile App OAuth API.
     Trích xuất promotion_id/checkinDay động, đối soát biến động điểm thực tế trước và sau khi claim.
     Trả về số điểm nhận thêm (nếu có).
     """
+    if state_store is not None and state_store.is_mobile_checkin_done():
+        logger.info("[App Check-in] [✓] Hôm nay đã điểm danh Mobile Check-in trước đó (StateStore). Bỏ qua payload 103 dư thừa.")
+        return 0
+
     logger.info("--- BẮT ĐẦU: DAILY CHECK-IN (BING MOBILE APP API - TYPE 103) ---")
     access_token = get_mobile_access_token(page)
     if not access_token:
@@ -439,6 +453,8 @@ def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "
             complete_val = attrs.get("complete")
             if complete_val in ("True", True):
                 logger.info(f"[App Check-in] [✓] Hôm nay đã điểm danh trên hệ thống trước đó (attributes.complete={complete_val}).")
+                if state_store is not None:
+                    state_store.mark_mobile_checkin_done(True)
                 return 0
         else:
             logger.info("[App Check-in] Không tìm thấy promotion check-in/streak, dùng payload 103 tiêu chuẩn.")
@@ -483,6 +499,9 @@ def solve_mobile_app_daily_checkin(page: Optional[Page] = None, country: str = "
         delta = int(round(end_balance - start_balance))
     elif result.get("points_awarded"):
         delta = int(result["points_awarded"])
+
+    if state_store is not None:
+        state_store.mark_mobile_checkin_done(True)
 
     if delta > 0:
         logger.info(f"[App Check-in] [✓] Đã kích hoạt điểm danh thành công (+{delta} pts)!")
@@ -714,3 +733,196 @@ def solve_mobile_app_read_to_earn(page: Optional[Page] = None, country: str = "v
 
     _log_info(f"[Read to Earn] Kết thúc: Đã hoàn thành {articles_read} bài (+{total_points_gained} pts).")
     return total_points_gained
+
+
+def fetch_dapi_me_profile(
+    page: Optional[Page] = None,
+    country: str = "vn",
+    dapi_url: Optional[str] = None,
+    access_token: Optional[str] = None,
+) -> dict:
+    """
+    Fetch structured rewards profile from `/dapi/me`.
+    Returns:
+      {"status": "ok" | "unavailable" | "error", "data": dict | None, "error": str | None}
+    """
+    token = access_token or get_mobile_access_token(page)
+    if not token:
+        return {"status": "unavailable", "data": None, "error": "no_token"}
+
+    headers = _build_sapphire_headers(token, country)
+    url = dapi_url or "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=BingApp&options=613"
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return {"status": "error", "data": None, "error": f"HTTP {resp.status_code}"}
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            return {"status": "error", "data": None, "error": "invalid_json_root"}
+        body = payload.get("response", payload)
+        if not isinstance(body, dict):
+            return {"status": "error", "data": None, "error": "invalid_response_body"}
+        return {"status": "ok", "data": body, "error": None}
+    except Exception as exc:
+        return {"status": "error", "data": None, "error": str(exc)}
+
+
+def _extract_counter_pair(entry: dict) -> Optional[tuple[int, int]]:
+    if not isinstance(entry, dict):
+        return None
+    cur = entry.get("pointProgress")
+    if cur is None:
+        cur = entry.get("progress")
+    if cur is None:
+        cur = entry.get("cur")
+    mx = entry.get("pointProgressMax")
+    if mx is None:
+        mx = entry.get("max")
+    if cur is None or mx is None:
+        return None
+    try:
+        return int(cur), int(mx)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_dapi_me_progress(dapi_data: dict) -> dict:
+    """
+    Extract structured progress from `dapi/me` JSON payload:
+    `counters`, `activities`, `promotions`, `balance`.
+    Explicitly distinguishes `status="empty"` (0 tasks remaining) from `status="error"`.
+    """
+    if not isinstance(dapi_data, dict):
+        return {"status": "error", "found": False, "found_pc": False, "found_mobile": False, "scrape_error": True}
+
+    result: dict = {
+        "status": "active",
+        "source": "dapi",
+        "balance": None,
+        "pc_cur": 0,
+        "pc_current": 0,
+        "pc_max": 90,
+        "mobile_cur": 0,
+        "mobile_current": 0,
+        "mobile_max": 60,
+        "found": False,
+        "found_pc": False,
+        "found_mobile": False,
+        "scrape_error": False,
+        "all_maxed": False,
+        "activities": {},
+        "promotions": [],
+        "punch_cards": [],
+        "all_activities_done": False,
+        "primary_four_done": False,
+    }
+
+    bal = dapi_data.get("balance")
+    if bal is not None:
+        try:
+            result["balance"] = int(bal)
+        except (TypeError, ValueError):
+            pass
+
+    counters = dapi_data.get("counters")
+    if isinstance(counters, dict):
+        for key, val in counters.items():
+            kl = str(key).lower()
+            pair = _extract_counter_pair(val)
+            if not pair:
+                continue
+            cur, mx = pair
+            if any(tok in kl for tok in ("pc", "desktop")):
+                result["pc_cur"] = result["pc_current"] = cur
+                result["pc_max"] = mx
+                result["found_pc"] = True
+            elif any(tok in kl for tok in ("mobile", "mob")):
+                result["mobile_cur"] = result["mobile_current"] = cur
+                result["mobile_max"] = mx
+                result["found_mobile"] = True
+    elif isinstance(counters, list):
+        for item in counters:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("type") or "").lower()
+            pair = _extract_counter_pair(item)
+            if not pair:
+                continue
+            cur, mx = pair
+            if any(tok in name for tok in ("pc", "desktop")):
+                result["pc_cur"] = result["pc_current"] = cur
+                result["pc_max"] = mx
+                result["found_pc"] = True
+            elif any(tok in name for tok in ("mobile", "mob")):
+                result["mobile_cur"] = result["mobile_current"] = cur
+                result["mobile_max"] = mx
+                result["found_mobile"] = True
+
+    # Collect promotions and punch cards
+    raw_promos: list[dict] = []
+    if isinstance(dapi_data.get("promotions"), list):
+        raw_promos.extend([p for p in dapi_data["promotions"] if isinstance(p, dict)])
+    if isinstance(dapi_data.get("punchCards"), list):
+        for pc in dapi_data["punchCards"]:
+            if isinstance(pc, dict):
+                result["punch_cards"].append(pc)
+                raw_promos.append(pc)
+    for extra_key in ("streak", "morePromotions"):
+        extra = dapi_data.get(extra_key)
+        if isinstance(extra, list):
+            raw_promos.extend([p for p in extra if isinstance(p, dict)])
+
+    raw_activities = dapi_data.get("activities")
+    if isinstance(raw_activities, dict):
+        for k, v in raw_activities.items():
+            if isinstance(v, dict):
+                cur = int(v.get("cur", v.get("progress", 0)) or 0)
+                mx = int(v.get("max", 1) or 1)
+                done = bool(v.get("done", v.get("complete", mx > 0 and cur >= mx)))
+                result["activities"][k] = {"cur": cur, "max": mx, "done": done}
+    elif isinstance(raw_activities, list):
+        for item in raw_activities:
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("name") or "Activity"
+                cur = int(item.get("progress", item.get("cur", 0)) or 0)
+                mx = int(item.get("max", 1) or 1)
+                done = bool(item.get("complete", item.get("done", mx > 0 and cur >= mx)))
+                result["activities"][title] = {"cur": cur, "max": mx, "done": done}
+
+    active_promos = []
+    for p in raw_promos:
+        is_complete = bool(p.get("complete", False)) or (
+            int(p.get("max", 1) or 1) > 0 and int(p.get("progress", 0) or 0) >= int(p.get("max", 1) or 1)
+        )
+        pts = int(p.get("pointValue") or p.get("points") or 0)
+        if not is_complete and pts > 0:
+            active_promos.append(p)
+    result["promotions"] = active_promos
+
+    result["found"] = bool(result["found_pc"] or result["found_mobile"])
+    if result["found_pc"] and result["found_mobile"]:
+        result["all_maxed"] = bool(
+            result["pc_cur"] >= result["pc_max"] and result["mobile_cur"] >= result["mobile_max"]
+        )
+
+    acts = result["activities"]
+    if acts:
+        primary_four = (
+            acts.get("Bing Search", {}).get("done", False)
+            and acts.get("Daily Set", {}).get("done", False)
+            and acts.get("Edge Browsing", {}).get("done", False)
+            and acts.get("Visual Search", {}).get("done", False)
+        )
+        result["primary_four_done"] = primary_four
+        result["all_activities_done"] = primary_four
+    elif not active_promos and result["all_maxed"]:
+        result["all_activities_done"] = True
+
+    if result["all_maxed"] and result["all_activities_done"] and not active_promos:
+        result["status"] = "empty"
+    elif not result["found"] and not active_promos and not acts:
+        result["status"] = "empty"
+    else:
+        result["status"] = "active"
+
+    return result

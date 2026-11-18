@@ -160,6 +160,89 @@ def generate_diverse_queries(needed: int, exclude: Optional[Set[str]] = None) ->
     return selected
 
 
+def generate_topic_clustered_queries(
+    needed: int,
+    cluster_size_range: tuple = (2, 5),
+    exclude: Optional[Set[str]] = None,
+) -> List[str]:
+    """
+    Sinh các truy vấn được nhóm theo từng cụm chủ đề nhỏ (2-5 câu liên quan/đợt),
+    ví dụ cùng một thành phố (thời tiết -> địa điểm -> ẩm thực -> khách sạn)
+    hoặc cùng một thiết bị (cấu hình -> giá bán -> đánh giá -> trải nghiệm)
+    hoặc cùng một món ăn (cách làm -> bí quyết -> mẹo nấu).
+    """
+    exclude_set = {k.lower().strip() for k in exclude} if exclude else set()
+    min_c, max_c = cluster_size_range
+    clusters: List[List[str]] = []
+
+    # 1. Cụm chủ đề Thành phố / Du lịch (thời tiết -> địa điểm -> ẩm thực -> khách sạn)
+    all_cities = list(dict.fromkeys(CITIES + TRAVEL_DESTINATIONS))
+    random.shuffle(all_cities)
+    for city in all_cities:
+        pool = [
+            f"thời tiết hôm nay tại {city}",
+            f"dự báo thời tiết 3 ngày tới ở {city}",
+            f"địa điểm check in đẹp nhất {city}",
+            f"kinh nghiệm du lịch tự túc {city}",
+            f"quán ăn ngon giá rẻ tại {city}",
+            f"khách sạn view đẹp ở {city}",
+            f"lịch trình khám phá 2 ngày 1 đêm {city}",
+        ]
+        clusters.append(pool)
+
+    # 2. Cụm chủ đề Công nghệ / Thiết bị (cấu hình -> giá bán -> đánh giá -> có nên mua)
+    tech_list = list(TECH_ITEMS)
+    random.shuffle(tech_list)
+    for item in tech_list:
+        pool = [
+            f"so sánh cấu hình {item}",
+            f"giá bán chính hãng {item}",
+            f"đánh giá chi tiết {item}",
+            f"mở hộp trải nghiệm {item}",
+            f"có nên mua {item}",
+        ]
+        clusters.append(pool)
+
+    # 3. Cụm chủ đề Ẩm thực (cách làm -> công thức -> bí quyết -> mẹo nấu)
+    recipe_list = list(RECIPE_ITEMS)
+    random.shuffle(recipe_list)
+    for dish in recipe_list:
+        pool = [
+            f"cách làm {dish}",
+            f"công thức nấu {dish}",
+            f"bí quyết làm món {dish}",
+            f"mẹo nấu {dish}",
+            f"hướng dẫn làm {dish}",
+        ]
+        clusters.append(pool)
+
+    # Xáo trộn thứ tự giữa các cụm chủ đề nhưng giữ nguyên tính liên kết bên trong mỗi cụm
+    random.shuffle(clusters)
+
+    selected: List[str] = []
+    for cluster in clusters:
+        if len(selected) >= needed:
+            break
+        target_cluster_len = random.randint(min_c, max_c)
+        cluster_picked: List[str] = []
+        for q in cluster:
+            q_clean = q.strip()
+            if q_clean.lower() not in exclude_set:
+                cluster_picked.append(q_clean)
+                exclude_set.add(q_clean.lower())
+                if len(cluster_picked) >= target_cluster_len:
+                    break
+        if cluster_picked:
+            selected.extend(cluster_picked)
+
+    # Bù thêm từ generate_diverse_queries nếu vẫn thiếu
+    if len(selected) < needed:
+        extra = generate_diverse_queries(needed - len(selected), exclude=exclude_set)
+        selected.extend(extra)
+
+    return selected[:needed]
+
+
 def fetch_trending_queries(geo: str = "VN", limit: int = 50) -> List[str]:
     """Lấy danh sách truy vấn đang hot từ Google Trends RSS."""
     url = f"https://trends.google.com/trending/rss?geo={geo}"
@@ -191,33 +274,55 @@ def fetch_trending_queries(geo: str = "VN", limit: int = 50) -> List[str]:
 
 def get_unique_search_queries(target_count: int, geo: str = "VN", max_history: int = 200) -> List[str]:
     """
-    Lấy danh sách từ khóa tìm kiếm độc nhất tuyệt đối:
-    1. Cào Google Trends mới nhất.
-    2. Lọc bỏ các từ khóa đã xuất hiện trong 200 từ gần nhất của data/searched_history.json.
-    3. Nếu không đủ số lượng, sinh thêm từ khóa từ bộ tổ hợp đời sống phong phú.
+    Lấy danh sách từ khóa tìm kiếm độc nhất tuyệt đối theo cụm chủ đề (Topic-Clustered):
+    1. Sinh các cụm mini-topic liên quan (2-5 câu cùng chủ đề mỗi đợt) để tránh nhảy chủ đề ngẫu nhiên.
+    2. Xen kẽ một số từ khóa đang hot từ Google Trends (nếu chưa có trong lịch sử 200 câu).
     """
+    if target_count <= 0:
+        return []
+
     history = load_searched_history()
     history_set = {k.lower().strip() for k in history if k}
 
-    # Lấy Google Trends (yêu cầu nhiều hơn để lọc trùng)
-    raw_trends = fetch_trending_queries(geo=geo, limit=max(50, target_count + 20))
-    
-    unique_queries = []
+    # Lấy một phần Google Trends (tối đa ~25% tổng nhu cầu) để giữ phần lớn các đợt tìm kiếm theo cụm chủ đề
+    raw_trends = fetch_trending_queries(geo=geo, limit=max(20, target_count))
+    trend_quota = max(1, target_count // 4) if target_count >= 4 else 0
+
+    trend_queries: List[str] = []
+    seen_lower = set(history_set)
     for q in raw_trends:
         q_clean = q.strip()
-        if q_clean and q_clean.lower() not in history_set and q_clean.lower() not in {x.lower() for x in unique_queries}:
-            unique_queries.append(q_clean)
+        if q_clean and q_clean.lower() not in seen_lower:
+            trend_queries.append(q_clean)
+            seen_lower.add(q_clean.lower())
+            if len(trend_queries) >= trend_quota:
+                break
 
-    # Nếu thiếu từ khóa do Trends ít hoặc trùng lặp quá nhiều trong ngày
-    if len(unique_queries) < target_count:
-        needed = target_count - len(unique_queries)
-        current_used = history_set.union({x.lower() for x in unique_queries})
-        synthesized = generate_diverse_queries(needed=needed, exclude=current_used)
-        unique_queries.extend(synthesized)
+    # Phần còn lại sinh theo cụm chủ đề 2-5 câu liên quan
+    cluster_needed = max(0, target_count - len(trend_queries))
+    clustered = generate_topic_clustered_queries(
+        needed=cluster_needed,
+        cluster_size_range=(2, 5),
+        exclude=seen_lower,
+    )
 
-    # Xáo trộn thứ tự tự nhiên
-    random.shuffle(unique_queries)
-    return unique_queries[:target_count]
+    # Giữ nguyên cấu trúc cụm chủ đề, chỉ chèn xen kẽ trend_queries giữa các cụm (không shuffle toàn bộ list)
+    if not trend_queries:
+        return clustered[:target_count]
+
+    result: List[str] = []
+    t_idx = 0
+    c_idx = 0
+    while len(result) < target_count and (c_idx < len(clustered) or t_idx < len(trend_queries)):
+        if c_idx < len(clustered):
+            chunk = clustered[c_idx : c_idx + 3]
+            result.extend(chunk)
+            c_idx += len(chunk)
+        if t_idx < len(trend_queries) and len(result) < target_count:
+            result.append(trend_queries[t_idx])
+            t_idx += 1
+
+    return result[:target_count]
 
 
 if __name__ == "__main__":
