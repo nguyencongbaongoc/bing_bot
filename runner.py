@@ -30,7 +30,13 @@ from core import (
     solve_promotional_links, solve_punch_cards, solve_visual_search_streak, solve_wallpaper_trivia,
     tap_corner_rewards_coin, typing_delay, unload_model_from_vram,
 )
-from core.activities import claim_all_available_rewards, dismiss_popups, extract_bing_star_bonus, solve_mobile_checkin
+from core.activities import (
+    claim_all_available_rewards,
+    claim_dashboard_pending_points,
+    dismiss_popups,
+    extract_bing_star_bonus,
+    solve_mobile_checkin,
+)
 from core.browser_manager import (
     BLOCKED_AD_TRACKER_DOMAINS, BROWSER_ARGS, CIRCADIAN_END_HOUR, CIRCADIAN_END_MINUTE,
     CIRCADIAN_START_HOUR, CIRCADIAN_START_MINUTE, DEFAULT_TIMEOUT, DUPLICATE_PATCHRIGHT_FLAGS,
@@ -379,9 +385,32 @@ def run_full_pipeline(
                     for fn, label in (
                         (lambda: ensure_streak_protection(d_page), "Streak Protection"),
                         (lambda: run_all_dashboard_activities(d_context, d_page), "Dashboard Activities"),
-                        (lambda: solve_visual_search_streak(d_page, state_store=store), "Visual Search Streak"),
                     ):
                         _safe_call(fn, label)
+
+                    vs_act = (initial_progress.get("activities") or {}).get("Visual Search") or {}
+                    visual_search_done = bool(vs_act.get("done"))
+                    if visual_search_done:
+                        _log_info("[Visual Search] Thẻ Visual Search đã hoàn thành (1/1 [✓]), bỏ qua.")
+                    elif store.is_visual_search_exhausted_today():
+                        _log_info("[Visual Search] Đã đạt giới hạn lần thử Visual Search trong ngày, bỏ qua.")
+                    elif headless:
+                        _log_info("[Visual Search] Khởi chạy phiên cửa sổ thực ngắn hạn (headless=False) để kích hoạt Bing kblob upload...")
+                        _close_quietly(d_context)
+                        d_context = None
+                        d_page = None
+                        vs_context = None
+                        try:
+                            vs_context = create_desktop_context(
+                                p, headless=False, account_id=ACCOUNT_ID, profile_dir=DESKTOP_PROFILE
+                            )
+                            vs_page = vs_context.pages[0] if vs_context.pages else vs_context.new_page()
+                            _safe_call(lambda: solve_visual_search_streak(vs_page, state_store=store), "Visual Search Streak")
+                        finally:
+                            _close_quietly(vs_context)
+                            d_context, d_page = ensure_desktop_page(None, p, headless=True)
+                    else:
+                        _safe_call(lambda: solve_visual_search_streak(d_page, state_store=store), "Visual Search Streak")
                     if store.is_mobile_checkin_done():
                         _log_info("[App Check-in] [✓] Hôm nay đã hoàn tất Daily Check-in trong StateStore, bỏ qua payload 103.")
                     else:
@@ -599,21 +628,28 @@ def run_full_pipeline(
                     d_context = d_page = None
 
             _log_info("[3/3] Đang lấy điểm số tổng kết...")
-            if all_tasks_completed and (d_done + m_done == 0):
-                end_points = start_points
-            else:
+            try:
+                d_context, d_page = ensure_desktop_page(d_context, p, headless)
                 try:
-                    d_context, d_page = ensure_desktop_page(d_context, p, headless)
-                    d_page.goto(REWARDS_URL, wait_until="domcontentloaded")
-                    dismiss_popups(d_page)
-                    d_page.wait_for_timeout(2000)
-                    end_points = extract_current_points(d_page)
-                    star_info = extract_bing_star_bonus(d_page)
-                    if star_info.get("found"):
-                        bing_star_bonus_str = star_info.get("text", bing_star_bonus_str)
-                finally:
-                    _close_quietly(d_context)
-                    d_context = None
+                    claim_dashboard_pending_points(d_page)
+                except Exception as e:
+                    _log_warning(f"[Final Claim] Lỗi kiểm tra điểm chờ nhận: {e}")
+                d_page.goto(REWARDS_URL, wait_until="domcontentloaded")
+                dismiss_popups(d_page)
+                d_page.wait_for_timeout(2000)
+                end_points = extract_current_points(d_page)
+                if not end_points and start_points > 0:
+                    end_points = start_points
+                star_info = extract_bing_star_bonus(d_page)
+                if star_info.get("found"):
+                    bing_star_bonus_str = star_info.get("text", bing_star_bonus_str)
+            except Exception as e:
+                _log_warning(f"[3/3] Lỗi khi lấy điểm tổng kết: {e}")
+                if not end_points and start_points > 0:
+                    end_points = start_points
+            finally:
+                _close_quietly(d_context)
+                d_context = None
 
             log_session_result(start_points, end_points, d_done + m_done)
             finish_session(end_points, status="completed" if (all_maxed and all_activities_done) else "partial")

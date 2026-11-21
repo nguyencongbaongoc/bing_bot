@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-11-17T12:47:41.031032",
+  "last_updated": "2026-11-20T09:57:15.846743",
   "history": [
     {
       "date": "2026-10-29",
@@ -129,10 +129,31 @@
       "earned_today": 259,
       "bing_star_bonus": "3 / 2.100",
       "updated_at": "2026-11-17T12:47:41.031032"
+    },
+    {
+      "date": "2026-11-18",
+      "total_points": 2523,
+      "earned_today": 269,
+      "bing_star_bonus": "3 / 2.100",
+      "updated_at": "2026-11-18T10:04:26.516583"
+    },
+    {
+      "date": "2026-11-19",
+      "total_points": 2796,
+      "earned_today": 240,
+      "bing_star_bonus": "3 / 2.100",
+      "updated_at": "2026-11-19T09:57:12.369241"
+    },
+    {
+      "date": "2026-11-20",
+      "total_points": 3061,
+      "earned_today": 250,
+      "bing_star_bonus": "3 / 2.100",
+      "updated_at": "2026-11-20T09:57:15.846743"
     }
   ],
-  "total_points": 2254,
-  "earned_today": 259,
+  "total_points": 3061,
+  "earned_today": 250,
   "bing_star_bonus": "3 / 2.100",
   "account_id": "default"
 }

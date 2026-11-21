@@ -3,6 +3,8 @@ Module tự động hóa hoàn thành Daily Set, Check-in, Polls, Quizzes trên 
 Xử lý các loại nhiệm vụ: Daily Check-in, Daily Set (giữ Streak), More Activities (Poll, Quiz, Link).
 """
 
+import base64
+import hashlib
 import random
 import re
 import time
@@ -152,6 +154,177 @@ def tap_corner_rewards_coin(page: Page, context_name: str = "PC") -> bool:
     Giữ lại chữ ký hàm để tương thích ngược các module/test import cũ.
     """
     return False
+
+
+def _is_locator_visible(loc, timeout: int = 1000) -> bool:
+    """Kiểm tra locator có hiển thị hay không một cách an toàn (tương thích cả Playwright và Mock)."""
+    try:
+        if hasattr(loc, "count"):
+            cnt = loc.count()
+            if isinstance(cnt, int) and cnt == 0:
+                return False
+        if hasattr(loc, "is_visible"):
+            res = loc.is_visible(timeout=timeout)
+            if res is False or str(res).lower() == "false":
+                return False
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_button_enabled(btn) -> bool:
+    """Kiểm tra nút bấm có đang ở trạng thái active / enabled hay không."""
+    try:
+        if hasattr(btn, "is_enabled"):
+            res = btn.is_enabled()
+            if res is False or str(res).lower() == "false":
+                return False
+        if hasattr(btn, "get_attribute"):
+            aria_dis = btn.get_attribute("aria-disabled")
+            if aria_dis and str(aria_dis).lower() in ("true", "1"):
+                return False
+            dis = btn.get_attribute("disabled")
+            if dis is not None and dis is not False and str(dis).lower() not in ("none", "false", ""):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def claim_dashboard_pending_points(page: Page) -> bool:
+    """
+    Tự động mở https://rewards.bing.com/dashboard và kiểm tra thẻ 'Ready to claim'.
+    Nếu có điểm chờ nhận, mở ngăn kéo slide-over 'Claim points' và bấm nút 'Claim points'.
+    Trả về True nếu bấm nhận thành công, False nếu không có điểm chờ nhận (0 pts / disabled).
+    """
+    _log_info("[Final Claim] Đang mở https://rewards.bing.com/dashboard để kiểm tra điểm chờ nhận...")
+    try:
+        # Bước 1: Điều hướng tới /dashboard và đợi các thẻ summary hydrate
+        page.goto("https://rewards.bing.com/dashboard", wait_until="domcontentloaded")
+        dismiss_popups(page)
+        page.wait_for_timeout(2500)
+    except Exception as e:
+        _log_warning(f"[Final Claim] Không thể mở /dashboard: {e}")
+
+    try:
+        # Bước 2: Kiểm tra ngăn kéo bên phải 'Claim points' đã mở sẵn hay chưa
+        drawer_button_selectors = [
+            'button:has-text("Claim points")',
+            'button:has-text("Nhận điểm")',
+            '[role="dialog"] button:has-text("Claim points")',
+            '[role="dialog"] button:has-text("Claim")',
+            '[role="button"]:has-text("Claim points")',
+        ]
+        drawer_already_open = False
+        for sel in drawer_button_selectors:
+            try:
+                btn_candidate = page.locator(sel).first
+                if _is_locator_visible(btn_candidate, timeout=300):
+                    drawer_already_open = True
+                    break
+            except Exception:
+                pass
+
+        if not drawer_already_open:
+            # Tìm và click thẻ / liên kết "Ready to claim" cạnh "Available points"
+            card_selectors = [
+                'a:has-text("Ready to claim")',
+                'button:has-text("Ready to claim")',
+                '[role="button"]:has-text("Ready to claim")',
+                'a:has-text("Sẵn sàng nhận")',
+                'button:has-text("Sẵn sàng nhận")',
+                '[role="button"]:has-text("Sẵn sàng nhận")',
+                'div:has-text("Ready to claim") button',
+                'div:has-text("Ready to claim") a',
+                'div:has-text("Ready to claim") [role="button"]',
+                'div:has-text("Sẵn sàng nhận") button',
+                'div:has-text("Sẵn sàng nhận") a',
+                'div:has-text("Sẵn sàng nhận") [role="button"]',
+                '[aria-label*="Ready to claim" i]',
+                '[aria-label*="Sẵn sàng nhận" i]',
+                'button:has-text("Claim")',
+                'a:has-text("Claim")',
+                '[role="button"]:has-text("Claim")',
+                'text="Ready to claim"',
+                ':has-text("Ready to claim")',
+                ':has-text("Sẵn sàng nhận")',
+            ]
+            clicked_card = False
+            for sel in card_selectors:
+                try:
+                    card_loc = page.locator(sel).first
+                    if _is_locator_visible(card_loc, timeout=800):
+                        try:
+                            card_loc.scroll_into_view_if_needed(timeout=1000)
+                        except Exception:
+                            pass
+                        card_loc.click(timeout=3000)
+                        clicked_card = True
+                        break
+                except Exception:
+                    continue
+
+            if clicked_card:
+                page.wait_for_timeout(1800)  # Đợi 1.5–2.0s để slide-over drawer mở ra
+
+        # Bước 3: Kiểm tra trạng thái và bấm nút 'Claim points'
+        # Kiểm tra xem có thông báo chặn "No points to claim right now" hay không
+        no_points_blocked = False
+        no_points_selectors = [
+            'text="No points to claim right now"',
+            ':has-text("No points to claim right now")',
+            'text="Không có điểm nào để nhận"',
+            ':has-text("Không có điểm nào để nhận")',
+            'text="0 points to claim"',
+            ':has-text("0 points to claim")',
+        ]
+        for np_sel in no_points_selectors:
+            try:
+                np_loc = page.locator(np_sel).first
+                if _is_locator_visible(np_loc, timeout=300):
+                    no_points_blocked = True
+                    break
+            except Exception:
+                pass
+
+        primary_claim_selectors = [
+            'button:has-text("Claim points")',
+            'button:has-text("Claim")',
+            'button:has-text("Nhận điểm")',
+            '[role="button"]:has-text("Claim points")',
+            '[role="dialog"] button:has-text("Claim points")',
+            '[role="dialog"] button:has-text("Claim")',
+            '[role="dialog"] button:has-text("Nhận điểm")',
+        ]
+
+        target_btn = None
+        for sel in primary_claim_selectors:
+            try:
+                btn_loc = page.locator(sel).first
+                if _is_locator_visible(btn_loc, timeout=1000):
+                    target_btn = btn_loc
+                    break
+            except Exception:
+                continue
+
+        if target_btn is not None:
+            enabled = _is_button_enabled(target_btn)
+            if enabled and not no_points_blocked:
+                target_btn.click(timeout=3000)
+                page.wait_for_timeout(2800)  # Đợi 2.5–3.0s để Available points cập nhật
+                _log_info("[Final Claim] [✓] Đã bấm nút 'Claim points' trong ngăn kéo Dashboard!")
+                return True
+            else:
+                _log_info("[Final Claim] Không có điểm chờ nhận trong ngăn kéo 'Claim points' (0 pts).")
+                return False
+        else:
+            _log_info("[Final Claim] Không có điểm chờ nhận trong ngăn kéo 'Claim points' (0 pts).")
+            return False
+
+    except Exception as e:
+        _log_warning(f"[Final Claim] Lỗi trong quá trình kiểm tra điểm chờ nhận: {e}")
+        return False
 
 
 def solve_checkin(page: Page) -> bool:
@@ -1702,46 +1875,81 @@ def solve_promotional_links(page: Page):
         logger.info("--- KẾT THÚC: PROMOTIONAL LINKS ---\n")
 
 
-def get_random_screenshot_path() -> Path | None:
+_LAST_VS_SCREENSHOT: Optional[Path] = None
+
+
+def _pick_local_screenshot(exclude_path: Optional[Path] = None) -> Optional[Path]:
     """
-    Quét và trả về đường dẫn 1 file ảnh ngẫu nhiên từ thư mục screenshot.
+    Quét các thư mục ảnh cục bộ (assets/visual_search_images, assets, Screenshots, project root)
+    và chọn ngẫu nhiên 1 file screenshot hợp lệ (tránh lặp lại file của lần thử trước).
     """
+    global _LAST_VS_SCREENSHOT
+    project_root = Path(__file__).resolve().parent.parent
     candidate_dirs = [
-        Path("./screenshot"),
-        Path("./screenshots"),
-        Path("./screen shot"),
-        Path("./Screenshot"),
-        Path("./Screenshots"),
-        Path("./data/screenshot"),
-        Path("./data/screenshots"),
+        project_root / "assets" / "visual_search_images",
+        project_root / "assets",
+        project_root / "Screenshots",
+        project_root / "screenshots",
+        project_root / "screenshot",
+        project_root,
     ]
-    
-    valid_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-    all_images = []
-    seen_dirs = set()
+
+    valid_extensions = {".png", ".jpg", ".jpeg"}
+    excluded_names = {"temp_vs_upload.jpg", "temp_viewport_capture.png", "visual_sample.png"}
+    all_images: list[Path] = []
+    seen_dirs: set[Path] = set()
+    seen_files: set[Path] = set()
 
     for c_dir in candidate_dirs:
-        if c_dir.exists() and c_dir.is_dir():
-            resolved_dir = c_dir.resolve()
-            if resolved_dir in seen_dirs:
+        if not (c_dir.exists() and c_dir.is_dir()):
+            continue
+        resolved_dir = c_dir.resolve()
+        if resolved_dir in seen_dirs:
+            continue
+        seen_dirs.add(resolved_dir)
+        is_root = resolved_dir == project_root.resolve()
+        for f in c_dir.iterdir():
+            if not f.is_file():
                 continue
-            seen_dirs.add(resolved_dir)
-            for f in c_dir.iterdir():
-                if f.is_file() and f.suffix.lower() in valid_extensions:
-                    # Chỉ lấy ảnh có dung lượng trên 10KB để đảm bảo Bing nhận diện tốt
-                    try:
-                        if f.stat().st_size >= 10240:
-                            all_images.append(f.resolve())
-                    except OSError:
-                        continue
+            if f.name.lower() in excluded_names:
+                continue
+            if f.suffix.lower() not in valid_extensions:
+                continue
+            if is_root and not (
+                f.name.lower().startswith("screenshot")
+                or f.suffix.lower() in {".png", ".jpg", ".jpeg"}
+            ):
+                continue
+            try:
+                if f.stat().st_size > 0:
+                    rf = f.resolve()
+                    if rf not in seen_files:
+                        seen_files.add(rf)
+                        all_images.append(rf)
+            except OSError:
+                continue
 
-    if all_images:
-        selected = random.choice(all_images)
-        logger.info(f"   [Visual Search] Đã chọn ngẫu nhiên ảnh: '{selected.name}' ({round(selected.stat().st_size / 1024, 1)} KB)")
-        return selected
+    if not all_images:
+        logger.warning("   [Visual Search] Không tìm thấy file screenshot cục bộ nào!")
+        return None
 
-    logger.warning("   [Visual Search] Không tìm thấy ảnh hợp lệ trong thư mục screenshot!")
-    return None
+    avoid = exclude_path.resolve() if exclude_path is not None else _LAST_VS_SCREENSHOT
+    pool = [p for p in all_images if avoid is None or p != avoid]
+    if not pool:
+        pool = all_images
+
+    selected = random.choice(pool)
+    _LAST_VS_SCREENSHOT = selected
+    logger.info(
+        f"   [Visual Search] Đã chọn ảnh cục bộ: '{selected.name}' "
+        f"({round(selected.stat().st_size / 1024, 1)} KB)"
+    )
+    return selected
+
+
+def get_random_screenshot_path() -> Optional[Path]:
+    """Tương thích ngược: trả về đường dẫn 1 file screenshot cục bộ ngẫu nhiên."""
+    return _pick_local_screenshot()
 
 
 def create_random_sample_png(filepath: str = "data/visual_sample.png") -> str:
@@ -1832,36 +2040,25 @@ def read_visual_search_streak_status(page: Page) -> dict:
         return {"cur": 0, "max": 1, "done": False}
 
 
-WIKIMEDIA_SAMPLE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Example.jpg/320px-Example.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg",
-]
-
-
 def is_valid_visual_search_result(url: str, target_page: Page = None) -> bool:
-    """Xác nhận kết quả Visual Search THẬT (chấp nhận iss=sbiupload / bcid= / view=detailV2 singleimage+insights / UrlPaste, từ chối explore.microsoft.com, FORM=SBIRDI, bare iss=sbi)."""
+    """Xác nhận kết quả Visual Search THẬT (chấp nhận iss=sbiupload / bcid= / #vs_insights / .irsikc, từ chối explore.microsoft.com, FORM=IMVNXT, FORM=SBIRDI, bare FORM=SBIHMP, bare iss=sbi)."""
     url_lower = (url or "").lower()
     if "explore.microsoft.com" in url_lower:
         return False
     if "form=sbirdi" in url_lower:
         return False
+    if "form=imvnxt" in url_lower:
+        return False
     if "iss=sbiupload" in url_lower or "bcid=" in url_lower:
         return True
-    if "sbisrc=urlpaste" in url_lower or "imgurl:" in url_lower or "imgurl=" in url_lower:
-        return True
-    if "view=detailv2" in url_lower and (
-        "idpview=singleimage" in url_lower
-        or "form=imvnxt" in url_lower
-        or "ccid=" in url_lower
-    ):
-        return True
+    if "form=sbihmp" in url_lower:
+        return False
     if re.search(r"(?:^|[?&])iss=sbi(?:&|$)", url_lower):
         return False
     if "form=vsmagc" in url_lower and "visualsearch" not in url_lower:
         return True
     if "visualsearch" in url_lower and any(
-        tok in url_lower for tok in ("imgurl=", "imgurl:", "sbiupload", "insights", "bcid=", "urlpaste")
+        tok in url_lower for tok in ("imgurl=", "imgurl:", "sbiupload", "insights", "bcid=")
     ):
         return True
     if target_page is not None:
@@ -1924,18 +2121,18 @@ def _set_file_input_upload(target_page: Page, image_path: str, selector: str) ->
     return False
 
 
-def submit_imagebin_post(target_page: Page, image_path: str) -> bool:
+def submit_imagebin_post(target_page: Page, image_path: str, timeout_sec: int = 10) -> bool:
     """
-    Fallback Community Method: Direct Base64 imageBin Form POST (iss=sbiupload).
+    Tier 3: Direct Base64 imageBin Form POST (iss=sbiupload, sbisrc=ImgPicker) trực tiếp từ trang vsstreak.
     Encode image_path sang raw Base64 và submit form POST lên Bing Visual Search:
-    <form method="POST" enctype="multipart/form-data" action="https://www.bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP">
+    <form method="POST" enctype="multipart/form-data"
+          action="https://www.bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP&sbisrc=ImgPicker">
       <input type="hidden" name="cbir" value="sbi">
       <input type="hidden" name="imageBin" value="<b64_image>">
     </form>
-    Đợi tối đa 12s cho iss=sbiupload / bcid= / .insightsOverlay.
+    Đợi tối đa timeout_sec (10s) cho iss=sbiupload / bcid= / #vs_insights.
     """
     try:
-        import base64
         img_p = Path(image_path).resolve()
         if not img_p.exists():
             logger.warning(f"   [!] Không tìm thấy ảnh để Base64 POST: {img_p}")
@@ -1944,11 +2141,11 @@ def submit_imagebin_post(target_page: Page, image_path: str) -> bool:
         with open(img_p, "rb") as f:
             b64_image = base64.b64encode(f.read()).decode("utf-8")
 
-        logger.info(f"   [*] Đang gửi form POST imageBin ({len(b64_image)} ký tự Base64)...")
+        logger.info(f"   [*] [Tier 3] Đang gửi form POST imageBin (sbisrc=ImgPicker, {len(b64_image)} ký tự Base64)...")
         cur_url = (target_page.url or "").lower()
         if "bing.com" not in cur_url:
             try:
-                target_page.goto("https://www.bing.com/images", wait_until="domcontentloaded", timeout=10000)
+                target_page.goto("https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES", wait_until="domcontentloaded", timeout=10000)
             except Exception:
                 pass
 
@@ -1956,7 +2153,7 @@ def submit_imagebin_post(target_page: Page, image_path: str) -> bool:
             const form = document.createElement('form');
             form.method = 'POST';
             form.enctype = 'multipart/form-data';
-            form.action = 'https://www.bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP';
+            form.action = 'https://www.bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP&sbisrc=ImgPicker';
 
             const cbir = document.createElement('input');
             cbir.type = 'hidden';
@@ -1975,23 +2172,15 @@ def submit_imagebin_post(target_page: Page, image_path: str) -> bool:
         }""", b64_image)
 
         wait_start = time.time()
-        while time.time() - wait_start < 12:
-            cur_u = (target_page.url or "").lower()
-            if "iss=sbiupload" in cur_u or "bcid=" in cur_u:
-                logger.info(f"   [✓] imageBin POST thành công (URL chứa iss=sbiupload/bcid=): {target_page.url}")
+        while time.time() - wait_start < timeout_sec:
+            if is_valid_visual_search_result(target_page.url, target_page):
+                logger.info(f"   [✓] [Tier 3] imageBin POST thành công: {target_page.url}")
                 return True
-            try:
-                overlay = target_page.locator(".insightsOverlay, .irsikc, #vs_insights, #detailCanvas, .mivsb").first
-                if overlay.count() > 0 and overlay.is_visible(timeout=500):
-                    logger.info("   [✓] imageBin POST thành công, visual insights overlay hiển thị!")
-                    return True
-            except Exception:
-                pass
             target_page.wait_for_timeout(500)
 
         if is_valid_visual_search_result(target_page.url, target_page):
             return True
-        logger.warning(f"   [!] Hết 12s chờ sau imageBin POST. URL: {target_page.url}")
+        logger.warning(f"   [!] Hết {timeout_sec}s chờ sau imageBin POST. URL: {target_page.url}")
         return False
     except Exception as e:
         logger.warning(f"   [!] Lỗi khi thực hiện imageBin POST: {e}")
@@ -2008,7 +2197,7 @@ def upload_visual_search_image(
     Upload ảnh Visual Search:
     - Khi prefer_file_chooser=True (luồng #sbi_b): ưu tiên expect_file_chooser(timeout=6000)
       khi bấm nút/label upload trong #sbi_b, fallback sang set_input_files, và cuối cùng fallback Base64 imageBin POST.
-    - Mặc định (tương thích Phase 8.1): ưu tiên direct set_input_files rồi fallback expect_file_chooser, sau đó fallback Base64 imageBin POST.
+    - Mặc định (tương thích Phase 8.1): ưu tiên direct set_input_files rồi fallback expect_file_chooser(timeout=5000), sau đó fallback Base64 imageBin POST.
     """
     sbi_browse_selectors = [
         '#sb_sbipane #sb_brtext',
@@ -2082,12 +2271,19 @@ def _upload_via_sbi_surface(target_page: Page, image_path: str) -> bool:
     )
 
 
-def _prepare_visual_search_jpeg(page: Page) -> Path:
-    """Chuẩn bị temp_vs_upload.jpg dạng RGB JPEG hợp lệ, cạnh dài >= 500px (tối đa 640px, quality=88)."""
+def _prepare_visual_search_jpeg(
+    page: Optional[Page] = None,
+    exclude_path: Optional[Path] = None,
+) -> Path:
+    """
+    Chọn ảnh screenshot cục bộ (tránh lặp lại file trước đó), cắt viền ngẫu nhiên 1-6px,
+    resize cạnh dài về 520-640px và lưu data/temp_vs_upload.jpg dạng RGB JPEG
+    với quality ngẫu nhiên 82-94 để mỗi lần upload có SHA256 hash khác nhau.
+    """
     from PIL import Image
 
-    img_path = get_random_screenshot_path()
-    if not img_path or not img_path.exists():
+    img_path = _pick_local_screenshot(exclude_path=exclude_path)
+    if (not img_path or not img_path.exists()) and page is not None:
         fallback_path = Path("./data/temp_viewport_capture.png").resolve()
         fallback_path.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(fallback_path))
@@ -2101,26 +2297,39 @@ def _prepare_visual_search_jpeg(page: Page) -> Path:
             if im.mode != "RGB":
                 im = im.convert("RGB")
             w, h = im.size
+            left = random.randint(1, 6)
+            top = random.randint(1, 6)
+            right = random.randint(1, 6)
+            bottom = random.randint(1, 6)
+            if w - (left + right) >= 64 and h - (top + bottom) >= 64:
+                im = im.crop((left, top, w - right, h - bottom))
+            w, h = im.size
             max_edge = max(w, h)
-            if max_edge > 640:
-                im.thumbnail((640, 640), Image.LANCZOS)
-            elif 0 < max_edge < 500:
-                scale = 500.0 / max_edge
+            target_edge = random.randint(520, 640)
+            if max_edge > 0:
+                scale = target_edge / float(max_edge)
                 im = im.resize(
                     (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
                     Image.LANCZOS,
                 )
-            im.save(upload_img_path, "JPEG", quality=88, optimize=True)
+            quality = random.randint(82, 94)
+            im.save(upload_img_path, "JPEG", quality=quality, optimize=True)
+        sha = hashlib.sha256(upload_img_path.read_bytes()).hexdigest()[:12]
         size_kb = round(upload_img_path.stat().st_size / 1024, 1)
-        logger.info(f"   [*] Ảnh upload đã chuẩn hóa JPEG: {upload_img_path.name} ({size_kb} KB)")
+        logger.info(
+            f"   [*] Ảnh upload đã chuẩn hóa JPEG: {upload_img_path.name} "
+            f"({size_kb} KB, quality={quality}, sha256={sha}...)"
+        )
         return upload_img_path
     except Exception as e:
         logger.warning(f"   [!] Chuẩn hóa ảnh thất bại ({e}), tạo JPEG RGB dự phòng 640x500...")
         try:
-            Image.new("RGB", (640, 500), (42, 118, 196)).save(upload_img_path, "JPEG", quality=88, optimize=True)
+            Image.new("RGB", (640, 500), (42, 118, 196)).save(
+                upload_img_path, "JPEG", quality=random.randint(82, 94), optimize=True
+            )
             return upload_img_path
         except Exception:
-            return img_path
+            return img_path if img_path is not None else upload_img_path
 
 
 def _click_with_optional_new_tab(
@@ -2159,18 +2368,18 @@ def _click_with_optional_new_tab(
 
 
 def _ensure_sbi_dropzone_mounted(active_page: Page) -> None:
-    """Đảm bảo hộp thoại camera #sb_sbipane đã mount & visible (bấm .b_icon camera hoặc #sb_sbip nếu cần)."""
-    dropzone_sel = '#sb_sbipane, #sb_brtext, label[for="sb_fileinput"], #sb_brs'
+    """Đảm bảo hộp thoại camera #sbi_b / #sb_sbipane đã mount & visible (click #sb_sbip timeout=5000, đợi 2s)."""
+    dropzone_sel = '#sbi_b, #sb_sbipane, #sb_brtext, label[for="sb_fileinput"], #sb_brs'
     try:
-        if active_page.locator(dropzone_sel).first.is_visible(timeout=1000) is True:
+        if active_page.locator(dropzone_sel).first.is_visible(timeout=800) is True:
             return
     except Exception:
         pass
 
     cam_selectors = (
+        '#sb_sbip',
         '.b_icon[aria-label*="hình ảnh" i]',
         '.b_icon[aria-label*="image" i]',
-        '#sb_sbip',
         '#sb_sbi',
         '#sb_camera',
         '.sbi_b',
@@ -2194,29 +2403,36 @@ def _ensure_sbi_dropzone_mounted(active_page: Page) -> None:
 
     try:
         if cam_btn is not None and cam_btn.count() > 0:
-            logger.info("   [*] Bấm nút Camera Bing để mở bảng upload #sb_sbipane...")
+            logger.info("   [*] Bấm #sb_sbip để mở bảng upload #sbi_b / #sb_sbipane...")
             try:
                 cam_btn.click(timeout=5000)
             except Exception:
                 cam_btn.click(force=True, timeout=5000)
+            active_page.wait_for_timeout(2000)
             try:
-                active_page.wait_for_selector(dropzone_sel, state="visible", timeout=5000)
+                active_page.wait_for_selector(dropzone_sel, state="visible", timeout=3000)
             except Exception:
                 pass
     except Exception as e:
         logger.debug(f"   [!] Không thể bấm nút Camera Bing: {e}")
 
 
+VSSTREAK_URL = "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES"
+
+
 def _open_visual_search_surface(page: Page) -> tuple[Page, list[Page]]:
     """
-    Mở bề mặt Visual Search giữ FORM tracking từ Rewards:
-    1. Click thẻ Visual Search trên /earn -> click CTA "Search now" (bing.com/?features=vsstreak,vstooltip&form=ML2XES) trong modal [role="dialog"].
-    2. Nếu qua explore.microsoft.com/.../visual-search/, bấm CTA chính để vào bing.com.
-    3. Fallback sang https://www.bing.com/images?FORM=SBIVSP (không dùng /visualsearch?FORM=VSMAGC vì 301 sang explore.microsoft.com).
-    4. Mở bảng upload #sb_sbipane qua nút Camera Bing.
+    Mở và giữ nguyên trang tracked vsstreak (features=vsstreak,vstooltip&form=ML2XES):
+    1. Click thẻ Visual Search trên /earn -> click CTA modal ([role="dialog"] a[href*="vsstreak"],
+       a[href*="features=vsstreak"], [role="dialog"] a[href*="bing.com"]) hoặc bắt tab mới context.pages[-1].
+    2. Nếu không mở được modal CTA / tab mới (hoặc rơi vào explore.microsoft.com), điều hướng trực tiếp
+       tới https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES.
+    3. Không bao giờ ghi đè trang vsstreak bằng bing.com/images/search?...
+    4. Click #sb_sbip (timeout=5000) và đợi 2s để #sbi_b / #sb_sbipane mount.
     """
     extra_tabs: list[Page] = []
     active_page = page
+    pages_before = list(getattr(page.context, "pages", []) or [])
 
     card_selectors = [
         'button:has-text("Visual Search"), button:has-text("Tìm kiếm trực quan")',
@@ -2232,63 +2448,96 @@ def _open_visual_search_surface(page: Page) -> tuple[Page, list[Page]]:
     if clicked_card and "rewards.bing.com" in (active_page.url or "").lower():
         modal_cta_selectors = [
             '[role="dialog"] a[href*="vsstreak"]',
+            'a[href*="features=vsstreak"]',
+            '[role="dialog"] a[href*="bing.com"]',
             '[role="dialog"] a[href*="ML2XES" i]',
             '[role="dialog"] button:has-text("Search now")',
             '[role="dialog"] button:has-text("Tìm kiếm ngay")',
-            '[role="dialog"] button:has-text("Search")',
-            '[role="dialog"] button:has-text("Tìm")',
             '[role="dialog"] a:has-text("Search now")',
             '[role="dialog"] a:has-text("Tìm kiếm ngay")',
-            '[role="dialog"] a:has-text("Search")',
-            '[role="dialog"] a:has-text("Tìm")',
-            '[role="dialog"] a[href*="bing.com/visualsearch"]',
-            '[role="dialog"] a[href*="bing.com/images"]',
-            '[role="dialog"] a',
-            'a[href*="bing.com/visualsearch"]',
-            'a[href*="bing.com/images"]',
-            '[role="dialog"] a:has-text("Dùng thử")',
-            '[role="dialog"] a:has-text("Try")',
-            '[role="dialog"] button:has-text("Dùng thử")',
-            '[role="dialog"] button:has-text("Try")',
         ]
         active_page, _ = _click_with_optional_new_tab(
             active_page, modal_cta_selectors, extra_tabs, "CTA modal Visual Search"
         )
 
-    if "explore.microsoft.com" in (active_page.url or "").lower():
-        dismiss_popups(active_page)
-        explore_cta_selectors = [
-            'a[href*="bing.com/images"]',
-            'a[href*="bing.com/visualsearch"]',
-            'a:has-text("Thử ngay")',
-            'a:has-text("Dùng thử")',
-            'a:has-text("Try")',
-            'button:has-text("Dùng thử")',
-            'button:has-text("Try")',
-        ]
-        active_page, _ = _click_with_optional_new_tab(
-            active_page, explore_cta_selectors, extra_tabs, "CTA trên explore.microsoft.com"
-        )
+    pages_after = list(getattr(page.context, "pages", []) or [])
+    if len(pages_after) > len(pages_before):
+        newest_tab = pages_after[-1]
+        if newest_tab is not page and newest_tab not in extra_tabs:
+            extra_tabs.append(newest_tab)
+        if newest_tab is not page:
+            active_page = newest_tab
 
     cur_url_lower = (active_page.url or "").lower()
-    on_bing_surface = (
+    on_tracked_vsstreak = (
         "bing.com" in cur_url_lower
         and "rewards.bing.com" not in cur_url_lower
         and "explore.microsoft.com" not in cur_url_lower
         and "form=sbirdi" not in cur_url_lower
     )
-    if not on_bing_surface:
+    if not on_tracked_vsstreak:
         if active_page is page:
             active_page = page.context.new_page()
             extra_tabs.append(active_page)
-        sbivsp_url = "https://www.bing.com/images?FORM=SBIVSP"
-        logger.info(f"   [*] Điều hướng tới {sbivsp_url}...")
-        active_page.goto(sbivsp_url, wait_until="domcontentloaded", timeout=15000)
+        logger.info(f"   [*] Điều hướng trực tiếp tới tracked vsstreak URL: {VSSTREAK_URL}")
+        active_page.goto(VSSTREAK_URL, wait_until="domcontentloaded", timeout=15000)
 
     active_page.wait_for_timeout(1500)
     dismiss_popups(active_page)
     _ensure_sbi_dropzone_mounted(active_page)
     return active_page, extra_tabs
+
+
+def _wait_for_vs_transition(active_page: Page, timeout_sec: float, tier_label: str) -> bool:
+    """Đợi tối đa timeout_sec giây cho URL iss=sbiupload / bcid= hoặc #vs_insights / .irsikc."""
+    wait_start = time.time()
+    while time.time() - wait_start < timeout_sec:
+        if is_valid_visual_search_result(active_page.url, active_page):
+            logger.info(f"   [✓] [{tier_label}] Đã xác nhận kết quả Visual Search: {active_page.url}")
+            return True
+        active_page.wait_for_timeout(500)
+    return is_valid_visual_search_result(active_page.url, active_page)
+
+
+def _dispatch_datatransfer_drop(active_page: Page, image_path: str) -> bool:
+    """
+    Tier 2: Dựng File trong DataTransfer qua page.evaluate(...) và phát sự kiện
+    dragenter, dragover, drop lên #sbi_dropzone, #sbi_b, #sb_sbipane.
+    """
+    try:
+        img_p = Path(image_path).resolve()
+        if not img_p.exists():
+            return False
+        b64_image = base64.b64encode(img_p.read_bytes()).decode("utf-8")
+        logger.info("   [*] [Tier 2] Đang phát sự kiện DataTransfer drop lên #sbi_dropzone / #sbi_b...")
+        dispatched = active_page.evaluate(
+            r"""([b64, filename]) => {
+                const target = document.querySelector('#sbi_dropzone, #sbi_b, #sb_sbipane');
+                if (!target) return false;
+                const bin = atob(b64);
+                const arr = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) {
+                    arr[i] = bin.charCodeAt(i);
+                }
+                const file = new File([arr], filename, { type: 'image/jpeg' });
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                for (const evName of ['dragenter', 'dragover', 'drop']) {
+                    const ev = new DragEvent(evName, {
+                        bubbles: true,
+                        cancelable: true,
+                        dataTransfer: dt
+                    });
+                    target.dispatchEvent(ev);
+                }
+                return true;
+            }""",
+            [b64_image, img_p.name],
+        )
+        return bool(dispatched)
+    except Exception as e:
+        logger.debug(f"   [!] [Tier 2] DataTransfer drop thất bại: {e}")
+        return False
 
 
 def _trigger_detail_v2_visual_search(active_page: Page) -> bool:
@@ -2356,20 +2605,18 @@ def _close_extra_tabs(main_page: Page, extra_tabs: list[Page]) -> None:
 
 def handle_visual_search_streak(page: Page, state_store=None) -> bool:
     """
-    Thực hiện Visual Search Streak theo Community Proven Visual Search Flow:
-    1. Activate /earn Offer & Modal CTA:
-       Click thẻ Visual Search trên /earn, đợi 2s modal/dialog hoặc tab mới, click CTA modal nếu có.
-    2. Primary Community Method — UrlPaste Visual Search (iss=sbi&sbisrc=UrlPaste):
-       Điều hướng tới bing.com/images/search?view=detailv2&iss=sbi&form=SBIHMP&sbisrc=UrlPaste&q=imgurl:<urllib.parse.quote(image_url, safe="")>.
-       Đợi tối đa 10s cho visual match panels (.insightsOverlay, .irsikc, #vs_insights, hoặc iss=sbi / bcid=).
-    3. Fallback Community Method — Direct Base64 imageBin Form POST (iss=sbiupload):
-       Nếu UrlPaste không render insights trong 10s, encode data/temp_vs_upload.jpg sang Base64 và submit form POST
-       tới bing.com/images/search?view=detailv2&iss=sbiupload&FORM=SBIHMP. Đợi tối đa 12s.
-    4. Telemetry Dwell & Verification:
-       Cuộn & dwell 7s để beacon telemetry Rewards ghi nhận, đóng tab phụ, đợi 3s,
-       rồi kiểm tra get_daily_search_progress(page) trên https://rewards.bing.com/earn.
+    Thực hiện Visual Search Streak 100% bằng ảnh screenshot cục bộ trên trang tracked vsstreak:
+    1. Mở /earn -> click thẻ Visual Search -> CTA modal hoặc tab mới -> fallback về
+       https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES (không ghi đè trang này).
+    2. Click #sb_sbip và đợi #sbi_b / #sb_sbipane mount.
+    3. Thực thi upload 3 tầng trực tiếp trên trang vsstreak:
+       - Tier 1: File Chooser (timeout=4500) / #sb_fileinput set_input_files + change (đợi 7s).
+       - Tier 2: Synthetic DataTransfer drop lên #sbi_dropzone, #sbi_b, #sb_sbipane (đợi 8s).
+       - Tier 3: multipart/form-data imageBin Form POST với sbisrc=ImgPicker (đợi 10s).
+    4. Click vào kết quả visual match (.irsikc a, #vs_insights a, .richImgLnk, .iusc),
+       cuộn & dwell 7s, đóng tab phụ, đợi 3s và kiểm tra get_daily_search_progress(page).
     """
-    logger.info("--- BẮT ĐẦU: VISUAL SEARCH STREAK (COMMUNITY FLOW) ---")
+    logger.info("--- BẮT ĐẦU: VISUAL SEARCH STREAK (LOCAL SCREENSHOT FLOW) ---")
     max_attempts = 3
 
     if state_store is not None and state_store.get_visual_search_attempts_today() >= max_attempts:
@@ -2405,84 +2652,44 @@ def handle_visual_search_streak(page: Page, state_store=None) -> bool:
             upload_img_path = _prepare_visual_search_jpeg(page)
             extra_tabs: list[Page] = []
             try:
-                # 1. Activate /earn Offer & Modal CTA
+                # 1. Mở trang tracked vsstreak & mount #sbi_b / #sb_sbipane
                 active_page, extra_tabs = _open_visual_search_surface(page)
-
                 result_url_confirmed = False
 
-                # Handle mock page in tests if present
-                if type(active_page).__name__ == "MagicMock":
-                    upload_success = upload_visual_search_image(
+                # Tier 1: File Chooser (timeout=4500) / #sb_fileinput trên trang vsstreak
+                tier1_browse_selectors = [
+                    '#sb_brs',
+                    'label[for="sb_fileinput"]',
+                    'span:has-text("Duyệt")',
+                    'span:has-text("Browse")',
+                    '#sb_sbipane #sb_brtext',
+                    '#sb_brtext',
+                ]
+                tier1_sent = _trigger_file_chooser_upload(
+                    active_page,
+                    str(upload_img_path),
+                    tier1_browse_selectors,
+                    timeout_ms=4500,
+                )
+                if not tier1_sent:
+                    tier1_sent = _set_file_input_upload(
                         active_page,
                         str(upload_img_path),
-                        prefer_file_chooser=True,
-                        file_chooser_timeout=6000,
+                        '#sbi_b input[type="file"], input#sb_fileinput',
                     )
-                    if upload_success:
-                        result_url_confirmed = True
+                if tier1_sent:
+                    result_url_confirmed = _wait_for_vs_transition(active_page, 7.0, "Tier 1")
 
-                # 2. Primary Community Method — UrlPaste Visual Search (iss=sbi&sbisrc=UrlPaste)
+                # Tier 2: Synthetic DataTransfer Drop lên #sbi_dropzone, #sbi_b, #sb_sbipane
                 if not result_url_confirmed:
-                    sample_img_url = random.choice(WIKIMEDIA_SAMPLE_URLS)
-                    quoted_img_url = urllib.parse.quote(sample_img_url, safe="")
-                    urlpaste_target = (
-                        f"https://www.bing.com/images/search?view=detailv2&iss=sbi&form=SBIHMP&sbisrc=UrlPaste&q=imgurl:{quoted_img_url}"
+                    if _dispatch_datatransfer_drop(active_page, str(upload_img_path)):
+                        result_url_confirmed = _wait_for_vs_transition(active_page, 8.0, "Tier 2")
+
+                # Tier 3: multipart/form-data imageBin Form POST với sbisrc=ImgPicker
+                if not result_url_confirmed:
+                    result_url_confirmed = submit_imagebin_post(
+                        active_page, str(upload_img_path), timeout_sec=10
                     )
-                    logger.info(f"   [*] [UrlPaste] Điều hướng Visual Search: {urlpaste_target}")
-                    try:
-                        active_page.goto(urlpaste_target, wait_until="domcontentloaded", timeout=15000)
-                    except Exception as e:
-                        logger.debug(f"   [!] active_page.goto UrlPaste lỗi/timeout: {e}")
-
-                    dismiss_popups(active_page)
-
-                    logger.info("   [*] [UrlPaste] Đợi tối đa 10s cho visual match panels render...")
-                    wait_start = time.time()
-                    while time.time() - wait_start < 10:
-                        cur_url = (active_page.url or "").lower()
-                        if is_valid_visual_search_result(cur_url, active_page):
-                            logger.info(f"   [✓] [UrlPaste] Đã xác nhận kết quả Visual Search THẬT: {active_page.url}")
-                            result_url_confirmed = True
-                            break
-                        try:
-                            panels = active_page.locator(".insightsOverlay, .irsikc, #vs_insights, #detailCanvas, .mivsb")
-                            if panels.count() > 0 and panels.first.is_visible(timeout=500):
-                                logger.info("   [✓] [UrlPaste] Đã hiển thị visual match panels!")
-                                result_url_confirmed = True
-                                break
-                        except Exception:
-                            pass
-                        if "view=detailv2" in cur_url and ("iss=sbi" in cur_url or "bcid=" in cur_url):
-                            logger.info(f"   [✓] [UrlPaste] URL view=detailv2 & (iss=sbi/bcid=) thỏa mãn: {active_page.url}")
-                            result_url_confirmed = True
-                            break
-                        active_page.wait_for_timeout(500)
-
-                # 3. Fallback Community Method — Direct Base64 imageBin Form POST (iss=sbiupload)
-                if not result_url_confirmed:
-                    logger.info("   [*] UrlPaste không render visual insights trong 10s. Chuyển sang Fallback Base64 imageBin POST...")
-                    result_url_confirmed = submit_imagebin_post(active_page, str(upload_img_path))
-
-                # Safety net: file chooser or detailV2 carousel click if still not confirmed
-                if not result_url_confirmed:
-                    logger.info("   [*] imageBin POST chưa đạt, thử fallback upload file / detailV2...")
-                    upload_success = upload_visual_search_image(
-                        active_page,
-                        str(upload_img_path),
-                        prefer_file_chooser=True,
-                        file_chooser_timeout=6000,
-                    )
-                    if upload_success:
-                        wait_start = time.time()
-                        while time.time() - wait_start < 6:
-                            if is_valid_visual_search_result(active_page.url, active_page):
-                                result_url_confirmed = True
-                                break
-                            active_page.wait_for_timeout(500)
-                    if not result_url_confirmed:
-                        result_url_confirmed = _trigger_detail_v2_visual_search(active_page)
-                        if result_url_confirmed:
-                            logger.info(f"   [✓] Đã xác nhận kết quả Visual Search detailV2: {active_page.url}")
 
                 if not result_url_confirmed:
                     logger.warning(f"   [!] Không xác nhận được kết quả Visual Search. URL hiện tại: {active_page.url}")
@@ -2494,27 +2701,27 @@ def handle_visual_search_streak(page: Page, state_store=None) -> bool:
                     logger.info("--- KẾT THÚC: VISUAL SEARCH STREAK ---\n")
                     return False
 
-                # 4. Telemetry Dwell & Verification
+                # 4. Mandatory Visual-Match Result Click & Telemetry Dwell (7s)
+                for rc_sel in ('.irsikc a, #vs_insights a, .richImgLnk, .iusc', '.irsikc a', '#vs_insights a', '.richImgLnk', '.iusc'):
+                    try:
+                        rc_elem = active_page.locator(rc_sel).first
+                        if rc_elem.count() > 0 and rc_elem.is_visible(timeout=1000):
+                            rc_elem.scroll_into_view_if_needed(timeout=1000)
+                            active_page, _ = _click_with_optional_new_tab(
+                                active_page, [rc_sel], extra_tabs, "kết quả visual match"
+                            )
+                            break
+                    except Exception:
+                        continue
+
                 dwell_sec = 7
-                logger.info(f"   [*] Đã vào trang kết quả Visual Search, cuộn và dwell {dwell_sec}s để beacon telemetry ghi nhận...")
+                logger.info(f"   [*] Đã vào trang kết quả Visual Search, cuộn nhẹ và dwell {dwell_sec}s để beacon telemetry ghi nhận...")
                 active_page.wait_for_timeout(3500)
                 try:
                     active_page.mouse.wheel(0, 300)
                 except Exception:
                     pass
                 active_page.wait_for_timeout(3500)
-
-                for rc_sel in ('#detailCanvas', '.insightsOverlay', '.irsikc a', '.vsl_card a', '.vs_items a'):
-                    try:
-                        rc_elem = active_page.locator(rc_sel).first
-                        if rc_elem.count() > 0 and rc_elem.is_visible(timeout=1000):
-                            rc_elem.scroll_into_view_if_needed(timeout=1000)
-                            rc_elem.click(force=True, timeout=1500)
-                            logger.info(f"   [*] Đã click vào kết quả chi tiết ({rc_sel})")
-                            active_page.wait_for_timeout(1000)
-                            break
-                    except Exception:
-                        continue
             finally:
                 _close_extra_tabs(page, extra_tabs)
 

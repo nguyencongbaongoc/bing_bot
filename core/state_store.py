@@ -279,6 +279,9 @@ class StateStore:
             return 0
         return int(data.get("visual_search_attempts_today", 0) or 0)
 
+    def is_visual_search_exhausted_today(self, today_str: str | None = None) -> bool:
+        return self.get_visual_search_attempts_today(today_str) >= MAX_VISUAL_SEARCH_ATTEMPTS_PER_DAY
+
     def increment_visual_search_attempts_today(
         self,
         attempts: int = 1,

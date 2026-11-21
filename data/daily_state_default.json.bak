@@ -9,12 +9,12 @@
   "visual_search_attempts_today": 3,
   "mobile_checkin_done": true,
   "alerts_sent": {
-    "milestone_1500": "2026-11-18"
+    "milestone_1500": "2026-11-21"
   },
   "consecutive_failures": 0,
   "account_id": "default",
-  "date": "2026-11-18",
-  "updated_at": "2026-11-18T10:04:26.524152",
+  "date": "2026-11-21",
+  "updated_at": "2026-11-21T18:11:13.728245",
   "partial": true,
-  "checkin_awarded": 50
+  "checkin_awarded": 10
 }
