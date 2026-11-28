@@ -1023,6 +1023,189 @@ class TestPhase86Fixes(unittest.TestCase):
             self.assertLess(idx_solve_vs, idx_close_vis)
             self.assertLess(idx_close_vis, idx_reopen_hl)
 
+    def test_12_searcher_uses_asyncio_sleep_and_zero_wait_for_timeout(self):
+        import asyncio as _asyncio
+
+        searcher_src = (ROOT_DIR / "core" / "searcher.py").read_text(encoding="utf-8")
+        searcher_calls = _collect_called_names(searcher_src)
+        self.assertNotIn("wait_for_timeout", searcher_calls)
+        self.assertIn("asyncio", searcher_src)
+        self.assertIn("await asyncio.sleep", searcher_src)
+
+        # Verify _sleep_ms runs independently on Python event loop without calling page.wait_for_timeout
+        mock_page = MagicMock()
+        mock_page.is_closed.return_value = False
+        mock_page.wait_for_timeout.side_effect = AssertionError("wait_for_timeout must not be called")
+
+        sleep_calls: list[float] = []
+        orig_async_sleep = searcher.asyncio.sleep
+
+        async def spy_async_sleep(sec):
+            sleep_calls.append(sec)
+            await orig_async_sleep(0)
+
+        with patch.object(searcher.asyncio, "sleep", side_effect=spy_async_sleep):
+            searcher._sleep_ms(120, page=mock_page)
+
+        mock_page.wait_for_timeout.assert_not_called()
+        self.assertEqual(len(sleep_calls), 1)
+        self.assertAlmostEqual(sleep_calls[0], 0.12, places=3)
+
+    def test_13_search_watchdog_60s_timeout_and_target_closed_recovery(self):
+        import asyncio as _asyncio
+        import time as _time
+
+        self.assertEqual(runner.SEARCH_QUERY_TIMEOUT_SECONDS, 60.0)
+
+        # Case A: Hung search exceeds watchdog timeout -> logs [Watchdog], kills/closes hung context, recovers page/context
+        ctx_hung = MagicMock()
+        page_hung = MagicMock()
+        page_hung.is_closed.return_value = False
+        ctx_fresh = MagicMock()
+        page_fresh = MagicMock()
+        page_fresh.is_closed.return_value = False
+
+        closed_items: list[object] = []
+
+        def fake_close(item):
+            closed_items.append(item)
+
+        def hanging_then_ok_search(pg, q, device_type="desktop"):
+            if pg is page_hung:
+                _time.sleep(0.35)
+                return True
+            return True
+
+        ensure_calls = [(ctx_hung, page_hung), (ctx_fresh, page_fresh)]
+        with (
+            patch.object(runner, "execute_single_search", side_effect=hanging_then_ok_search),
+            patch.object(runner, "_close_quietly", side_effect=fake_close),
+            patch.object(runner, "force_kill_profile_processes", return_value=1) as mock_kill,
+            patch.object(runner, "_log_warning") as mock_warn,
+        ):
+            out_ctx, out_page, ok = runner._execute_query_with_recovery(
+                ctx_hung,
+                page_hung,
+                lambda c, pw, hl: ensure_calls.pop(0),
+                None,
+                True,
+                "test hang query",
+                "desktop",
+                "PC Search",
+                profile_dir=Path("profiles/default/desktop"),
+                timeout_sec=0.05,
+            )
+
+        self.assertTrue(ok)
+        self.assertIs(out_ctx, ctx_fresh)
+        self.assertIs(out_page, page_fresh)
+        self.assertIn(page_hung, closed_items)
+        self.assertIn(ctx_hung, closed_items)
+        self.assertGreaterEqual(mock_kill.call_count, 1)
+        self.assertTrue(any("[Watchdog]" in str(c.args[0]) for c in mock_warn.call_args_list if c.args))
+
+        # Case B: TargetClosedError on both attempts -> closes hung ctx/page AND recovers fresh page/context before next query
+        ctx_bad1, page_bad1 = MagicMock(), MagicMock()
+        ctx_bad2, page_bad2 = MagicMock(), MagicMock()
+        ctx_rec, page_rec = MagicMock(), MagicMock()
+        ensure_seq = [(ctx_bad1, page_bad1), (ctx_bad2, page_bad2), (ctx_rec, page_rec)]
+
+        with (
+            patch.object(runner, "execute_single_search", side_effect=_asyncio.TimeoutError("simulated 60s hang")),
+            patch.object(runner, "_close_quietly"),
+            patch.object(runner, "force_kill_profile_processes", return_value=0),
+            patch.object(runner, "_log_warning") as mock_warn2,
+        ):
+            rec_ctx, rec_page, ok2 = runner._execute_query_with_recovery(
+                ctx_bad1,
+                page_bad1,
+                lambda c, pw, hl: ensure_seq.pop(0),
+                None,
+                True,
+                "double timeout query",
+                "mobile",
+                "Mobile Search",
+                profile_dir=Path("profiles/default/mobile"),
+                timeout_sec=60.0,
+            )
+
+        self.assertFalse(ok2)
+        self.assertIs(rec_ctx, ctx_rec)
+        self.assertIs(rec_page, page_rec)
+        self.assertTrue(any("[Watchdog]" in str(c.args[0]) for c in mock_warn2.call_args_list if c.args))
+
+    def test_14_visual_search_tier1_redirect_skips_tier2_and_tier3(self):
+        for redirect_url in (
+            "https://www.bing.com/images/search?view=detailv2&FORM=SBIHMP",
+            "https://www.bing.com/search?q=cach+scan+ma+qr&FORM=SBIHMP",
+            "https://www.bing.com/images/search?bcid=xyz999",
+        ):
+            main_page = MagicMock()
+            main_page.url = "https://rewards.bing.com/earn"
+            main_page.is_closed.return_value = False
+
+            vs_tab = MagicMock()
+            vs_tab.url = "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES"
+            vs_tab.is_closed.return_value = False
+            vs_tab.context.pages = [main_page, vs_tab]
+
+            def fake_fc_upload(pg, img_path, selectors, timeout_ms=4500, target_url=redirect_url):
+                pg.url = target_url
+                return True
+
+            with (
+                contextlib.ExitStack() as stack,
+                patch.object(activities, "dismiss_popups"),
+                patch.object(activities, "claim_all_available_rewards"),
+                patch.object(activities, "_prepare_visual_search_jpeg", return_value=Path("data/temp_vs_upload.jpg")),
+                patch.object(activities, "_open_visual_search_surface", return_value=(vs_tab, [vs_tab])),
+                patch.object(activities, "_trigger_file_chooser_upload", side_effect=fake_fc_upload),
+                patch.object(activities, "_dispatch_datatransfer_drop") as mock_tier2,
+                patch.object(activities, "submit_imagebin_post") as mock_tier3,
+                patch.object(
+                    activities,
+                    "read_visual_search_streak_status",
+                    side_effect=[{"cur": 0, "max": 1, "done": False}, {"cur": 1, "max": 1, "done": True}],
+                ),
+                patch.object(
+                    activities,
+                    "get_daily_search_progress",
+                    return_value={"activities": {"Visual Search": {"cur": 1, "max": 1, "done": True}}},
+                ),
+            ):
+                ok = handle_visual_search_streak(main_page)
+
+            self.assertTrue(ok)
+            mock_tier2.assert_not_called()
+            mock_tier3.assert_not_called()
+
+    def test_15_exit_on_cooldown_default_true_and_schedule_limits(self):
+        seen_flags: list[bool] = []
+        with (
+            patch.object(runner, "configure_account"),
+            patch.object(runner, "acquire_runner_lock", return_value=MagicMock()),
+            patch.object(runner, "release_runner_lock"),
+            patch.object(runner, "cleanup_zombie_browsers"),
+            patch.object(runner, "is_within_circadian_window", return_value=True),
+            patch.object(runner, "is_today_already_completed", return_value=True),
+            patch.object(
+                runner,
+                "run_full_pipeline",
+                side_effect=lambda a: seen_flags.append(a.exit_on_cooldown) or True,
+            ),
+            patch.object(runner, "put_pc_to_sleep"),
+            patch.object(sys, "argv", ["runner.py", "--no-sleep"]),
+        ):
+            with self.assertRaises(SystemExit) as cm:
+                runner.main()
+            self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(seen_flags, [True])
+
+        sched_ps1 = (ROOT_DIR / "schedule_setup.ps1").read_text(encoding="utf-8")
+        self.assertIn("-ExecutionTimeLimit (New-TimeSpan -Minutes 25)", sched_ps1)
+        self.assertIn("-MultipleInstances IgnoreNew", sched_ps1)
+        self.assertNotIn("--no-exit-on-cooldown", sched_ps1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

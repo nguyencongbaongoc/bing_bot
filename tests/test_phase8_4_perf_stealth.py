@@ -49,12 +49,10 @@ class TestPhase84PerfStealth(unittest.TestCase):
         class FakePage:
             keyboard = FakeKeyboard()
 
-            def wait_for_timeout(self, ms):
-                pauses_seen.append(ms)
-
         target = "thoi tiet ha noi hom nay"
         page = FakePage()
-        searcher.biometric_type_text(page, target, typo_prob=1.0)
+        with patch.object(searcher, "_sleep_ms", side_effect=lambda ms, page=None: pauses_seen.append(ms)):
+            searcher.biometric_type_text(page, target, typo_prob=1.0)
 
         self.assertEqual("".join(typed_buffer), target)
         # Ensure at least one Backspace correction happened (buffer had extra char typed then removed)

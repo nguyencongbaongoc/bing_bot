@@ -25,13 +25,16 @@ $action = New-ScheduledTaskAction -Execute $venvPython -Argument "`"$runnerPy`""
 $triggerInterval = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Hours 4) -RandomDelay (New-TimeSpan -Minutes 10)
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME -RandomDelay (New-TimeSpan -Minutes 10)
 
-# 3. Settings: Cho phep tu dong danh thuc may (-WakeToRun), chay bang pin, chay ngay neu bi lo gio, yeu cau co mang Internet
+# 3. Settings: Cho phep tu dong danh thuc may (-WakeToRun), chay bang pin, chay ngay neu bi lo gio, yeu cau co mang Internet,
+# gioi han thoi gian chay toi da 25 phut (PT25M) va khong chay chong len phien dang chay (IgnoreNew)
 $settings = New-ScheduledTaskSettingsSet `
     -WakeToRun `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -RunOnlyIfNetworkAvailable
+    -RunOnlyIfNetworkAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 25) `
+    -MultipleInstances IgnoreNew
 
 # 4. Kiem tra task cu de ghi de (dong the if day du dau ngoac nhon)
 $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue

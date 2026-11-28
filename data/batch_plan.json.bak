@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-11-28T18:51:44.060951",
+  "date_key": "2026-11-28",
+  "account": "default",
+  "profile_dir": "C:\\Users\\Nguyen Cong Thong\\Desktop\\ms-rewards-bot\\profiles\\default",
+  "desktop_profile_dir": "C:\\Users\\Nguyen Cong Thong\\Desktop\\ms-rewards-bot\\profiles\\default\\desktop",
+  "mobile_profile_dir": "C:\\Users\\Nguyen Cong Thong\\Desktop\\ms-rewards-bot\\profiles\\default\\mobile",
+  "headless": true,
+  "exit_on_cooldown": true,
+  "has_browser_tasks": true,
+  "run_activities": false,
+  "run_visual_search": true,
+  "visual_search_image_path": "C:\\Users\\Nguyen Cong Thong\\Desktop\\ms-rewards-bot\\data\\temp_vs_upload.jpg",
+  "pc_queries": [],
+  "mobile_queries": [],
+  "ctr_rate": 0.25,
+  "dwell_ms_range": [
+    3000,
+    5000
+  ],
+  "known_points_before": 6050,
+  "known_bing_star_before": 3,
+  "attempted_offers": [],
+  "attempted_quest_tasks": [
+    "https://rewards.bing.com/earn/quest/WW_pcparent_RewardsApp_weekly_Exclusive_Novw4_2026_punchcard::more activities"
+  ],
+  "api_summary": {
+    "dapi_ok": true,
+    "balance": 6050,
+    "found_pc": false,
+    "found_mobile": false,
+    "pc_cur": 0,
+    "pc_max": 90,
+    "mobile_cur": 0,
+    "mobile_max": 60,
+    "bing_star_points": 0,
+    "checkin_pts": 0,
+    "promo_claimed": 0,
+    "rte_pts": 0
+  }
+}

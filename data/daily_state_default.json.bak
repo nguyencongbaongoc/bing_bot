@@ -4,17 +4,21 @@
   "status": "partial",
   "edge_browsing_seconds": 1860,
   "edge_browsing_done": true,
-  "searches_completed_today": true,
+  "searches_completed_today": false,
   "core_tasks_done": false,
   "visual_search_attempts_today": 3,
   "mobile_checkin_done": true,
+  "read_to_earn_done": true,
+  "daily_activities_completed": false,
+  "bing_star_points": 0,
+  "attempted_quest_tasks": [],
+  "attempted_offers": [],
   "alerts_sent": {
-    "milestone_1500": "2026-11-21"
+    "milestone_1500": "2026-11-25",
+    "milestone_3400": "2026-11-25"
   },
   "consecutive_failures": 0,
   "account_id": "default",
-  "date": "2026-11-21",
-  "updated_at": "2026-11-21T18:11:13.728245",
-  "partial": true,
-  "checkin_awarded": 10
+  "date": "2026-11-27",
+  "updated_at": "2026-11-27T12:08:59.769361"
 }
